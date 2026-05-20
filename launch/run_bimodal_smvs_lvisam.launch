@@ -1,0 +1,34 @@
+<launch>
+    <!--
+        Bimodal SMVS launch for LVI-SAM on jackal/handheld datasets.
+        Usage:
+          roslaunch slamspoof_icra run_bimodal_smvs_lvisam.launch
+        Then run the node:
+          rosrun slamspoof_icra BimodalSpoofingSimulation.py
+    -->
+    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/smvs/"/>
+    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/vul/"/>
+
+    <param name="smvs_save_dir" value="$(arg smvs_save_dir)"/>
+    <param name="vulnerablity_save_dir" value="$(arg vulnerablity_save_dir)"/>
+
+    <!-- LVI-SAM input topics -->
+    <param name="subscribe_topic_name" value="/points_raw"/>
+    <param name="subscribe_odometry_name" value="/lvi_sam/lidar/mapping/odometry"/>
+
+    <!-- Camera topic: LVI-SAM handheld.bag uses compressed images -->
+    <param name="camera_topic" value="/camera/image_raw/compressed"/>
+    <param name="camera_transport" value="compressed"/>
+
+    <!-- LVI-SAM handheld.bag uses Velodyne VLP-16: point_step=22 -->
+    <param name="lidar_topic_length" value="22"/>
+
+    <!-- G-ICP parameters -->
+    <param name="number_of_iterations" value="1"/>
+    <param name="sample_rate" value="0.2"/>
+    <param name="noise_variance" value="0.1"/>
+
+    <!-- VINS feature fallback -->
+    <param name="use_vins_feature" value="false"/>
+    <param name="vins_feature_topic" value="/lvi_sam/feature/points"/>
+</launch>

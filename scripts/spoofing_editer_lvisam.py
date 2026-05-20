@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""
+spoofing_editer_lvisam.py
+==========================
+Stage D trajectory-guided LiDAR spoofing attack editor for LVI-SAM.
+
+支持三种攻击模式（由 config["main"]["spoofing_mode"] 选择）：
+  removal   — HFR 攻击：删除攻击窗口内点 → 补随机噪声点
+  static    — 假墙注入：删除攻击窗口内点 → 注入固定距离的平面墙
+  dynamic   — 动墙注入：删除攻击窗口内点 → 注入随时间周期变化的墙
+
+Key design principles:
+  1. 所有非 /points_raw topics 原样写回（camera, IMU, GPS 等）。
+  2. /points_raw 保持 point_step=22 布局不变（x, y, z, intensity, ring, time）。
+     注入的伪造点合成完整的 22-byte 记录，不破坏字段结构。
+  3. 参考轨迹（原始 LVI-SAM odometry）只加载一次，用于判断是否触发攻击。
+  4. 攻击方向在 LiDAR 局部坐标系下计算（减去机器人 yaw），
+     无论机器人在世界哪个朝向，移除窗口始终正确。
+
+Usage
+-----
+  roslaunch slamspoof_icra rosbag_editer_lvisam.launch
+
+The config file is passed via ROS param ``config_file``.
+"""
+
+import os
+import sys
+import json
+from typing import Optional
+
+import rospy
+import numpy as np
+import pandas as pd
+from rosbags.rosbag1 import Reader, Writer
+from rosbags.typesys import Stores, get_typestore
+
+# Add the scripts/ directory to sys.path for functions/ subpackage.
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
+
+from functions import spoofing_sim_lvisam
+
+
+# ---------------------------------------------------------------------------
+# Helper: binary → xyz
+# ---------------------------------------------------------------------------
+
+def binary_to_xyz(binary: np.ndarray):
+    """Extract (x, y, z) from raw uint8 binary records."""
+    x = binary[:, 0:4].view(dtype=np.float32)
+    y = binary[:, 4:8].view(dtype=np.float32)
+    z = binary[:, 8:12].view(dtype=np.float32)
+    return x.flatten(), y.flatten(), z.flatten()
+
+
+# ---------------------------------------------------------------------------
+# Helper: quaternion → yaw
+# ---------------------------------------------------------------------------
+
+def quaternion_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
+    """Return the yaw (rotation around world Z) of a unit quaternion."""
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return np.arctan2(siny_cosp, cosy_cosp)
+
+
+# ---------------------------------------------------------------------------
+# State: loaded once per run
+# ---------------------------------------------------------------------------
+
+class StageDState:
+    """
+    Holds the reference trajectory and runtime state for Stage D
+    trajectory-guided spoofing.
+    """
+
+    def __init__(self, config: dict, rng: np.random.Generator):
+        self.rng = rng
+
+        self.ref_file = config["main"].get("reference_file")
+        if not self.ref_file:
+            raise RuntimeError(
+                "config['main']['reference_file'] is required for Stage D"
+            )
+
+        df = pd.read_csv(self.ref_file)
+        self.ref_t  = df["time"].to_numpy()
+        self.ref_x  = df["x"].to_numpy()
+        self.ref_y  = df["y"].to_numpy()
+        self.ref_z  = df["z"].to_numpy()
+        self.ref_qx = df.get("qx", pd.Series([0.0] * len(df))).to_numpy()
+        self.ref_qy = df.get("qy", pd.Series([0.0] * len(df))).to_numpy()
+        self.ref_qz = df.get("qz", pd.Series([0.0] * len(df))).to_numpy()
+        self.ref_qw = df.get("qw", pd.Series([1.0] * len(df))).to_numpy()
+
+        self.ref_t0 = float(self.ref_t[0])
+
+        self.bag_start_sec: Optional[float] = None
+
+        self.stats = {
+            "total_frames":       0,
+            "triggered_frames":   0,
+            "removed_points_sum": 0,
+            "removed_points_max": 0,
+            "injected_points_sum": 0,
+            "injected_points_max": 0,
+        }
+
+        rospy.loginfo(f"[Stage D] Loaded reference trajectory: {self.ref_file}")
+        rospy.loginfo(f"[Stage D] Reference poses: {len(df)}")
+
+    def lookup(self, bag_timestamp_ns: int):
+        """
+        Return (x, y, z, yaw, bag_rel_sec) for the given bag timestamp.
+        """
+        now_sec = bag_timestamp_ns / 1e9 if bag_timestamp_ns > 1e12 else float(bag_timestamp_ns)
+
+        if self.bag_start_sec is None:
+            self.bag_start_sec = now_sec
+
+        rel_sec = now_sec - self.bag_start_sec
+        query_t = self.ref_t0 + rel_sec
+
+        idx = int(np.argmin(np.abs(self.ref_t - query_t)))
+        x   = float(self.ref_x[idx])
+        y   = float(self.ref_y[idx])
+        z   = float(self.ref_z[idx])
+        yaw = quaternion_yaw(
+            float(self.ref_qx[idx]),
+            float(self.ref_qy[idx]),
+            float(self.ref_qz[idx]),
+            float(self.ref_qw[idx]),
+        )
+
+        return x, y, z, yaw, rel_sec
+
+
+# ---------------------------------------------------------------------------
+# Attack direction helpers
+# ---------------------------------------------------------------------------
+
+def attack_angle_world(robot_x: float, robot_y: float,
+                       spoofer_x: float, spoofer_y: float) -> float:
+    """Angle from robot to spoofer in the world frame (radians)."""
+    return np.arctan2(spoofer_y - robot_y, spoofer_x - robot_x)
+
+
+def attack_angle_lidar_local(robot_x: float, robot_y: float,
+                             spoofer_x: float, spoofer_y: float,
+                             robot_yaw: float) -> float:
+    """
+    Angle from robot to spoofer in the LiDAR local frame (radians).
+
+    Subtracts the robot's yaw so the removal/injection window is always
+    expressed relative to the LiDAR's forward direction.
+    """
+    world_angle = attack_angle_world(robot_x, robot_y, spoofer_x, spoofer_y)
+    local_angle = world_angle - robot_yaw
+    return np.arctan2(np.sin(local_angle), np.cos(local_angle))
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    config_file = rospy.get_param("config_file", "")
+    if not config_file:
+        raise rospy.ROSException(
+            "rospy.get_param('config_file') is empty — pass via roslaunch <param>"
+        )
+
+    with open(config_file, "r") as f:
+        config = json.load(f)
+
+    output_file = config["main"]["output_file"]
+    if os.path.exists(output_file):
+        os.remove(output_file)
+
+    # ── Load config ────────────────────────────────────────────────────────
+    typestore       = get_typestore(Stores.ROS1_NOETIC)
+    points_topic    = config["main"]["lidar_topic"]
+    spoofing_mode   = config["main"].get("spoofing_mode", "removal")
+    spoofer_x       = float(config["main"]["spoofer_x"])
+    spoofer_y       = float(config["main"]["spoofer_y"])
+    distance_thresh = float(config["main"]["distance_threshold"])
+    spoofing_range  = float(config["main"]["spoofing_range"])
+    half_range_deg  = spoofing_range / 2.0
+
+    # LVI-SAM-compatible count model.
+    # point_count_model:
+    #   original      -> use SLAMSpoof original injection count formula
+    #   equal_replace -> replace as many points as removed
+    #   pure_removal  -> remove points without adding spoofed points
+    point_count_model = config["main"].get("point_count_model", "original")
+    static_geometry_model = config["main"].get("static_geometry_model", "original_random")
+    wall_intensity = float(config["main"].get("wall_intensity", 120.0))
+
+    # D-SLAMSpoof: square/corner/planar geometry parameters
+    # square_scale_S: scaling constant for polar equation d_fake=S/(|sin|+|cos|)
+    #   If None, defaults to wall_distance * sqrt(2) (makes average dist ≈ wall_distance)
+    square_scale_S = config["main"].get("square_scale_S", None)
+    # square_rotate_rad: rotation of the polar equation (radians)
+    #   0.0       → corner/L-shape (adjacent edges facing LiDAR, default)
+    #   π/4≈0.785 → planar wall (opposite edges, perpendicular to radial)
+    square_rotate_raw = config["main"].get("square_rotate_rad", None)
+    square_rotate_rad = None
+    if square_rotate_raw is not None:
+        import math
+        square_rotate_rad = float(square_rotate_raw)
+        if isinstance(square_rotate_raw, str) and "pi" in square_rotate_raw.lower():
+            # Allow string like "pi/4" for convenience
+            if square_rotate_raw.lower() == "pi/4":
+                square_rotate_rad = math.pi / 4.0
+            elif square_rotate_raw.lower() == "pi/2":
+                square_rotate_rad = math.pi / 2.0
+            elif square_rotate_raw.lower() == "pi":
+                square_rotate_rad = math.pi
+    elif static_geometry_model == "corner":
+        import math
+        square_rotate_rad = 0.0
+    elif static_geometry_model == "planar":
+        import math
+        square_rotate_rad = math.pi / 4.0
+
+    # D-SLAMSpoof: Oscillating Injection constraint parameters
+    # M_corr: max correspondence distance of the target SLAM (conservative default: 1.0m)
+    #   Increase if the SLAM uses a larger outlier rejection threshold.
+    M_corr = float(config["main"].get("M_corr", 1.0))
+    # lidar_scan_period: Δt between consecutive scans (VLP-16: 0.1s, HDL-64: 0.05s)
+    lidar_scan_period = float(config["main"].get("lidar_scan_period", 0.1))
+    # auto_cycle: if True, compute optimal t_cycle from M_corr constraint (D-SLAMSpoof Eq.4)
+    auto_cycle = config["main"].get("auto_cycle", True)
+
+    sim_cfg = config.get("simulator", {})
+    horizontal_resolution = float(sim_cfg.get("horizontal_resolution", 0.1))
+    vertical_lines = float(sim_cfg.get("vertical_lines", 16.0))
+    spoofing_rate = float(sim_cfg.get("spoofing_rate", 0.1))
+
+    wall_dist       = float(config["main"].get("wall_dist", 15.0))
+    wall_dist_min   = float(config["main"].get("wall_distance_min", 5.0))
+    wall_dist_max   = float(config["main"].get("wall_distance_max", 25.0))
+    spoofing_cycle  = float(config["main"].get("spoofing_cycle", 2.0))
+
+    if spoofing_mode not in ("removal", "static", "dynamic"):
+        rospy.logwarn(
+            f"Unknown spoofing_mode '{spoofing_mode}', using 'removal'."
+        )
+        spoofing_mode = "removal"
+
+    rospy.loginfo(
+        f"[spoofing_editer_lvisam] mode={spoofing_mode}  "
+        f"spoofing_range={spoofing_range}°  "
+        f"wall_dist={wall_dist}m  "
+        f"geometry_model={static_geometry_model}  "
+        f"square_S={square_scale_S}  "
+        f"square_rot={square_rotate_rad}  "
+        f"M_corr={M_corr}m  "
+        f"auto_cycle={auto_cycle}  "
+        f"distance_thresh={distance_thresh}m"
+    )
+
+    # ── Initialise state (with a seeded RNG for reproducibility) ──────────
+    rng_seed = int(config["main"].get("rng_seed", 42))
+    rng = np.random.default_rng(rng_seed)
+    state = StageDState(config, rng)
+
+    lidar_topic_length = int(config["main"].get("lidar_topic_length", 22))
+
+    with Reader(config["main"]["input_file"]) as reader, \
+         Writer(output_file) as writer:
+
+        connections = {}
+
+        for connection, timestamp, rawdata in reader.messages():
+
+            # ── Create writer connection once per topic ────────────────────────
+            if connection.topic not in connections:
+                rospy.loginfo(
+                    f"[spoofing_editer_lvisam] add connection: {connection.topic}"
+                )
+                connections[connection.topic] = writer.add_connection(
+                    connection.topic,
+                    connection.msgtype,
+                    typestore=typestore,
+                )
+
+            # ── Non-pointcloud topics: pass through unchanged ──────────────
+            if connection.topic != points_topic:
+                writer.write(connections[connection.topic], timestamp, rawdata)
+                continue
+
+            # ── PointCloud2 on /points_raw ──────────────────────────────────
+            points_msg = typestore.deserialize_ros1(rawdata, connection.msgtype)
+            state.stats["total_frames"] += 1
+
+            point_step = points_msg.point_step
+            n_points   = int(len(points_msg.data) / point_step)
+            bin_points = np.frombuffer(
+                points_msg.data, dtype=np.uint8
+            ).reshape(n_points, point_step)
+
+            robot_x, robot_y, robot_z, robot_yaw, bag_rel_sec = state.lookup(timestamp)
+
+            dist_to_spoofer = np.sqrt(
+                (robot_x - spoofer_x) ** 2 + (robot_y - spoofer_y) ** 2
+            )
+            is_triggered = dist_to_spoofer <= distance_thresh
+
+            if is_triggered:
+                state.stats["triggered_frames"] += 1
+
+                # Attack direction in LiDAR local frame
+                center_rad = attack_angle_lidar_local(
+                    robot_x, robot_y, spoofer_x, spoofer_y, robot_yaw
+                )
+                # Convert to degrees for spoofing_sim_lvisam (uses degrees internally)
+                center_deg  = np.degrees(center_rad) % 360.0
+
+                x, y, z = binary_to_xyz(bin_points)
+                n_original = bin_points.shape[0]
+
+                if spoofing_mode == "removal":
+                    modified = spoofing_sim_lvisam.removal_injection(
+                        bin_points,
+                        center_deg,
+                        half_range_deg,
+                        rng,
+                        point_count_model=point_count_model,
+                        horizontal_resolution=horizontal_resolution,
+                        vertical_lines=vertical_lines,
+                        spoofing_rate=spoofing_rate,
+                        point_step=lidar_topic_length,
+                        lidar_scan_period=lidar_scan_period,
+                    )
+
+                elif spoofing_mode == "static":
+                    modified = spoofing_sim_lvisam.static_injection(
+                        bin_points,
+                        center_deg,
+                        half_range_deg,
+                        wall_dist,
+                        rng,
+                        point_count_model=point_count_model,
+                        horizontal_resolution=horizontal_resolution,
+                        vertical_lines=vertical_lines,
+                        static_geometry_model=static_geometry_model,
+                        wall_intensity=wall_intensity,
+                        square_scale_S=square_scale_S,
+                        square_rotate_rad=square_rotate_rad,
+                        point_step=lidar_topic_length,
+                        lidar_scan_period=lidar_scan_period,
+                    )
+
+                elif spoofing_mode == "dynamic":
+                    modified = spoofing_sim_lvisam.dynamic_injection(
+                        bin_points,
+                        center_deg,
+                        half_range_deg,
+                        bag_rel_sec,
+                        rng,
+                        wall_dist_min=wall_dist_min,
+                        wall_dist_max=wall_dist_max,
+                        spoofing_cycle=spoofing_cycle,
+                        point_count_model=point_count_model,
+                        horizontal_resolution=horizontal_resolution,
+                        vertical_lines=vertical_lines,
+                        static_geometry_model=static_geometry_model,
+                        wall_intensity=wall_intensity,
+                        square_scale_S=square_scale_S,
+                        square_rotate_rad=square_rotate_rad,
+                        M_corr=M_corr,
+                        lidar_scan_period=lidar_scan_period,
+                        auto_cycle=auto_cycle,
+                        point_step=lidar_topic_length,
+                    )
+
+                if is_triggered:
+                    n_removed = n_original - modified.shape[0]
+                    state.stats["removed_points_sum"] += n_removed
+                    state.stats["removed_points_max"]   = max(
+                        state.stats["removed_points_max"], n_removed
+                    )
+                    state.stats["injected_points_sum"] += n_removed
+                    state.stats["injected_points_max"]  = max(
+                        state.stats["injected_points_max"], n_removed
+                    )
+            else:
+                modified = bin_points
+
+            n_modified = modified.shape[0]
+
+            points_msg.height     = 1
+            points_msg.width     = modified.shape[0]
+            points_msg.point_step = point_step
+            points_msg.row_step  = modified.shape[0] * point_step
+            points_msg.data      = modified.reshape(-1)
+
+            rawdata_out = typestore.serialize_ros1(points_msg, connection.msgtype)
+            writer.write(connections[connection.topic], timestamp, rawdata_out)
+
+    # ── Print summary ────────────────────────────────────────────────────────
+    s = state.stats
+    n = s["total_frames"]
+    t = s["triggered_frames"]
+    rospy.loginfo("=" * 54)
+    rospy.loginfo("  spoofing_editer_lvisam summary")
+    rospy.loginfo("=" * 54)
+    rospy.loginfo(f"  Mode                 : {spoofing_mode}")
+    rospy.loginfo(f"  Total frames         : {n}")
+    rospy.loginfo(f"  Triggered frames     : {t}  ({100.0 * t / max(n, 1):.4f}%)")
+    if t > 0:
+        rospy.loginfo(
+            f"  Mean removed/frame   : {s['removed_points_sum'] / t:.1f}"
+        )
+        rospy.loginfo(
+            f"  Max removed (frame)  : {s['removed_points_max']}"
+        )
+        if spoofing_mode != "removal":
+            rospy.loginfo(
+                f"  Mean injected/frame  : {s['injected_points_sum'] / t:.1f}"
+            )
+            rospy.loginfo(
+                f"  Max injected (frame) : {s['injected_points_max']}"
+            )
+    rospy.loginfo(f"  Output bag           : {output_file}")
+    rospy.loginfo("=" * 54)
+
+
+if __name__ == "__main__":
+    main()

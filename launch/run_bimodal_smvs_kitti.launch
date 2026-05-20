@@ -1,0 +1,37 @@
+<launch>
+    <!--
+        KITTI dataset SMVS: set ROS params only.
+        Run the node separately:
+          rosrun slamspoof_icra BimodalSpoofingSimulation.py
+
+        Usage:
+          Terminal 1: roslaunch lvi_sam KITTI.launch
+          Terminal 2: rosparam set use_sim_time true && rosrun slamspoof_icra BimodalSpoofingSimulation.py
+          Terminal 3: rosbag play kitti.bag use_sim_time:=true
+    -->
+    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/smvs/"/>
+    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/vul/"/>
+
+    <param name="smvs_save_dir" value="$(arg smvs_save_dir)"/>
+    <param name="vulnerablity_save_dir" value="$(arg vulnerablity_save_dir)"/>
+
+    <!-- LVI-SAM input topics -->
+    <param name="subscribe_topic_name" value="/points_raw"/>
+    <param name="subscribe_odometry_name" value="/lvi_sam/lidar/mapping/odometry"/>
+
+    <!-- KITTI camera: raw sensor_msgs/Image (mono8), NOT compressed -->
+    <param name="camera_topic" value="/kitti/camera_gray_left/image_raw"/>
+    <param name="camera_transport" value="raw"/>
+
+    <!-- KITTI Velodyne HDL-64: point_step=18 (x,y,z,intensity,ring, no time) -->
+    <param name="lidar_topic_length" value="18"/>
+
+    <!-- G-ICP parameters -->
+    <param name="number_of_iterations" value="1"/>
+    <param name="sample_rate" value="0.2"/>
+    <param name="noise_variance" value="0.1"/>
+
+    <!-- VINS feature fallback -->
+    <param name="use_vins_feature" value="false"/>
+    <param name="vins_feature_topic" value="/lvi_sam/feature/points"/>
+</launch>

@@ -1,0 +1,42 @@
+{
+  "main": {
+    "input_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/jackal.bag",
+    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/attack_beam_project/jackal_attack_beam_project.bag",
+    "reference_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/original/jackal_original_traj.csv",
+    "spoofing_mode": "static",
+    "spoofer_x": 1.22172989326338,
+    "spoofer_y": 37.4901177196684,
+    "distance_threshold": 15.0,
+    "lidar_topic": "/points_raw",
+    "lidar_topic_length": 22,
+    "imu_topic": "/imu_correct",
+    "spoofed_topic": "/points_raw",
+    "spoofing_range": 80.0,
+    "wall_dist": 10.0,
+    "rng_seed": 42,
+    "point_count_model": "original",
+    "static_geometry_model": "square",
+    "wall_intensity": 50.0,
+
+    "square_scale_S": null,
+    "square_rotate_rad": null,
+
+    "M_corr": 1.0,
+    "lidar_scan_period": 0.1,
+    "auto_cycle": true
+  },
+  "simulator": {
+    "horizontal_resolution": 0.1,
+    "vertical_lines": 16.0,
+    "spoofing_rate": 0.3,
+    "minimum_distance": 0.0,
+    "maximum_distance": 30.0
+  },
+  "filtering": {
+    "minimum_measuring_distance": 0.0,
+    "maximum_measuring_distance": 30.0,
+    "minimum_height_threshold": -2.0
+  }
+}
+
+

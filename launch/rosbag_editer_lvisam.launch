@@ -1,0 +1,12 @@
+<launch>
+    <!--
+        ROS bag attack injector for LVI-SAM.
+        Usage:
+          roslaunch slamspoof_icra rosbag_editer_lvisam.launch config_file_path:=path/to/config.json
+        Then run:
+          rosrun slamspoof_icra spoofing_editer_lvisam.py
+    -->
+    <arg name="config_file_path"
+         default="$(find slamspoof_icra)/config_lvisam.json"/>
+    <param name="config_file" value="$(arg config_file_path)"/>
+</launch>

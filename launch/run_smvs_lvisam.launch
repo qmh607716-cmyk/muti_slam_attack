@@ -1,0 +1,25 @@
+<launch>
+    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/smvs/"/>
+    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/vul/"/>
+
+    <param name="smvs_save_dir" value="$(arg smvs_save_dir)"/>
+    <param name="vulnerablity_save_dir" value="$(arg vulnerablity_save_dir)"/>
+
+    <!-- LVI-SAM input topics -->
+    <param name="subscribe_topic_name" value="/points_raw"/>
+    <param name="subscribe_odometry_name" value="/lvi_sam/lidar/mapping/odometry"/>
+
+    <!-- LVI-SAM handheld.bag uses Velodyne-style point_step=22 -->
+    <param name="lidar_topic_length" value="22"/>
+
+    <!-- SMVS parameters: use lighter values first for full bag -->
+    <param name="number_of_iterations" value="1"/>
+    <param name="sample_rate" value="0.2"/>
+    <param name="noise_variance" value="0.1"/>
+
+    <node pkg="slamspoof_icra"
+          type="SpoofingSimulation.py"
+          name="smvs_lvisam_node"
+          output="screen"
+          required="true"/>
+</launch>

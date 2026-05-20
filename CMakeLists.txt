@@ -158,12 +158,30 @@ include_directories(
 # all install targets should use catkin DESTINATION variables
 # See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
 
-## Mark executable scripts (Python etc.) for installation
-## in contrast to setup.py, you can choose the destination
-# catkin_install_python(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+## Install the entire scripts/ tree as a directory.
+## This preserves subdirectories like functions/, __init__.py, __pycache__.
+## Each .py file gets a symlink in devel/lib/slamspoof_icra/scripts/ pointing to
+## the source in src/slamspoof/scripts/.
+install(DIRECTORY scripts/
+  DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}/scripts
+  USE_SOURCE_PERMISSIONS
+  PATTERN "__pycache__" EXCLUDE
+)
+
+## Mark other files for installation (e.g. launch and bag files, etc.)
+install(FILES
+  config_lvisam.json
+  config_lvisam_kitti.json
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
+install(DIRECTORY launch/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+)
+
+install(DIRECTORY scripts/
+  DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}/scripts
+)
 
 ## Mark executables for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_executables.html
