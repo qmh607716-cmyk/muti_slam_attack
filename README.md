@@ -29,10 +29,9 @@
 |---|---|---|
 | `original_random` | 均匀随机分布平面墙 | 分散在弧线上 |
 | `beam_project` | 沿原 scan line 方向投影到固定距离 | 继承原拓扑结构 |
-| `square` | D-SLAMSpoof 菱形集中几何 | 约束集中在边缘方向（最强） |
-| `corner` | L 形墙角（square + rotate=0） | 两侧边缘面向 LiDAR |
+| `square` | D-SLAMSpoof 菱形集中几何 | 约束集中在边缘方向|
+| `corner` | L 形墙角| 两侧边缘面向 LiDAR |
 
-> **核心洞察**：均匀墙的攻击效果依赖 SLAM 数值误差（不可控），而 `square` 通过主动设计约束分布产生**方向性持续漂移**（可控）。
 
 ### 3. `dynamic` — 动墙注入
 墙距离在 `[wall_distance_min, wall_distance_max]` 之间周期性振荡，最优周期由 $M_{corr}$ 自动推导：
@@ -49,7 +48,7 @@ t_cycle = (d_max - d_min) / M_corr × Δt
 - ROS Noetic + Catkin Tools
 - LVI-SAM（`~/catkin_ws/devel_catkin_tools`）
 - `small_gicp`（G-ICP 后端）
-- 数据集：`~/catkin_ws/src/LVI-SAM/datasets/handheld.bag`
+- 数据集：`~/catkin_ws/src/LVI-SAM/datasets/xxx.bag`
 
 ### 环境准备
 ```bash
@@ -79,7 +78,7 @@ rosbag record -O ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/ha
 # ========== 终端 3 ==========
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel_catkin_tools/setup.bash
-rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock
+rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock --pause
 ```
 
 bag 播放完毕后（终端 3 自动结束），提取轨迹：
@@ -89,9 +88,6 @@ python3 ~/catkin_ws/src/slamspoof/scripts/extract_lvisam_odom_csv.py \
     --bag ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.bag \
     --out ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv
 ```
-
-> 如果该 CSV 已存在，可跳过阶段 1。
-
 ---
 
 ### 阶段 2：采集双模态 SMVS
@@ -117,7 +113,7 @@ rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock
 输出文件（由 launch 文件 `smvs_save_dir` / `vulnerablity_save_dir` 参数指定）：
 ```
 slamspoof_handheld/smvs/{timestamp}.csv      # 帧级 SMVS 分数
-slamspoof_handheld/vul/vul_{timestamp}.csv  # 72 桶分方向脆弱性
+slamspoof_handheld/vul/vul_{timestamp}.csv  # 分方向脆弱性
 ```
 
 ---
@@ -136,13 +132,13 @@ python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_from_bimodal.py \
     --match-mode nearest_xy
 ```
 
-输出中的 `spoofer_x` 和 `spoofer_y` 填入 `config_lvisam_handheld.json`（见下节）。
+输出中的 `spoofer_x` 和 `spoofer_y` 填入 `config_lvisam.json`（见下阶段）
 
 ---
 
 ### 阶段 4：生成攻击 Rosbag
 
-创建配置（复制并修改 `config_lvisam_handheld.json`）：
+修改配置（config_lvisam：修改路径/攻击模式/攻击参数）：
 
 ```json
 {
@@ -165,7 +161,7 @@ python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_from_bimodal.py \
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel_catkin_tools/setup.bash
 roslaunch slamspoof_icra rosbag_editer_lvisam.launch \
-    config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam_handheld.json
+    config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam.json
 ```
 
 ---
