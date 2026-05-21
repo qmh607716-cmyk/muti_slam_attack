@@ -377,16 +377,16 @@ def main():
                         point_step=lidar_topic_length,
                     )
 
-                if is_triggered:
-                    n_removed = n_original - modified.shape[0]
-                    state.stats["removed_points_sum"] += n_removed
-                    state.stats["removed_points_max"]   = max(
-                        state.stats["removed_points_max"], n_removed
-                    )
-                    state.stats["injected_points_sum"] += n_removed
-                    state.stats["injected_points_max"]  = max(
-                        state.stats["injected_points_max"], n_removed
-                    )
+                n_removed   = max(0, n_original - modified.shape[0])
+                n_injected  = max(0, modified.shape[0] - n_original + n_removed)
+                state.stats["removed_points_sum"] += n_removed
+                state.stats["removed_points_max"]   = max(
+                    state.stats["removed_points_max"], n_removed
+                )
+                state.stats["injected_points_sum"] += n_injected
+                state.stats["injected_points_max"]  = max(
+                    state.stats["injected_points_max"], n_injected
+                )
             else:
                 modified = bin_points
 
