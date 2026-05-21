@@ -246,7 +246,8 @@ def _feature_spatial_distribution(kp_list, img_w=_CAM_W, img_h=_CAM_H):
     return float(occupied.sum() / (rows * cols))
 
 
-def _parallax_approximate(kp_curr, kp_prev, img_w=_CAM_W, img_h=_CAM_H):
+def _parallax_approximate(kp_curr, kp_prev, curr_gray, prev_gray,
+                           img_w=_CAM_W, img_h=_CAM_H):
     """Approximate parallax: median distance from ORB descriptor brute-force matching."""
     try:
         import cv2
@@ -254,11 +255,13 @@ def _parallax_approximate(kp_curr, kp_prev, img_w=_CAM_W, img_h=_CAM_H):
         return 0.0
     if len(kp_curr) < 5 or len(kp_prev) < 5:
         return 0.0
+    if curr_gray is None or prev_gray is None:
+        return 0.0
     orb = cv2.ORB_create(nfeatures=100)
-    _, desc_c = orb.compute(
-        np.zeros((img_h, img_w), dtype=np.uint8), kp_curr)
-    _, desc_p = orb.compute(
-        np.zeros((img_h, img_w), dtype=np.uint8), kp_prev)
+    # Pass real grayscale images so ORB can extract descriptors at the
+    # detected keypoint locations (the earlier detect step used real images).
+    _, desc_c = orb.compute(curr_gray, kp_curr)
+    _, desc_p = orb.compute(prev_gray, kp_prev)
     if desc_c is None or desc_p is None or len(desc_c) == 0:
         return 0.0
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
@@ -316,7 +319,8 @@ def compute_visual_vul(
         depth_quality = float(np.clip(lidar_xyz_in_cam_fov / 5000.0, 0.0, 1.0))
 
     spatial_dist = _feature_spatial_distribution(kp_list)
-    parallax     = _parallax_approximate(kp_list, prev_kp_list)
+    parallax     = _parallax_approximate(kp_list, prev_kp_list,
+                                           curr_gray, prev_gray)
 
     # Per-bucket quantities
     feature_density = _project_kp_to_lidar_bucket(

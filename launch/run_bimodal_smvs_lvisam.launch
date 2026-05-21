@@ -3,11 +3,11 @@
         Bimodal SMVS launch for LVI-SAM on jackal/handheld datasets.
         Usage:
           roslaunch slamspoof_icra run_bimodal_smvs_lvisam.launch
-        Then run the node:
-          rosrun slamspoof_icra BimodalSpoofingSimulation.py
+        Then play the bag in another terminal.
     -->
-    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/smvs/"/>
-    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/vul/"/>
+    <!-- Dataset: slamspoof_handheld (handheld.bag) -->
+    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/smvs/"/>
+    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/vul/"/>
 
     <param name="smvs_save_dir" value="$(arg smvs_save_dir)"/>
     <param name="vulnerablity_save_dir" value="$(arg vulnerablity_save_dir)"/>
@@ -31,4 +31,7 @@
     <!-- VINS feature fallback -->
     <param name="use_vins_feature" value="false"/>
     <param name="vins_feature_topic" value="/lvi_sam/feature/points"/>
+
+    <!-- Launch the BimodalSpoofingSimulation node -->
+    <node name="bimodal_smvs" pkg="slamspoof_icra" type="BimodalSpoofingSimulation.py" output="screen" cwd="node"/>
 </launch>

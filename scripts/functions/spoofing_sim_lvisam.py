@@ -196,7 +196,9 @@ def _synth_noise_records(n: int,
 
     x = r * np.cos(theta_rad)
     y = r * np.sin(theta_rad)
-    z = r * np.sin(elev_rad)
+    # Use tan(elev) to preserve physical elevation angle (Pitch = arctan(z/r)).
+    # Using sin would compress the elevation: arctan(sin(elev)) ≠ elev.
+    z = r * np.tan(elev_rad)
 
     intensity = rng.uniform(10.0, 50.0, size=n)
     ring = _approx_ring_from_z_and_r(z, r, num_lines=num_lines)
@@ -237,7 +239,9 @@ def _synth_wall_records_original(n: int,
     r = np.full(n, wall_distance, dtype=np.float32)
     x = r * np.cos(theta_rad)
     y = r * np.sin(theta_rad)
-    z = r * np.sin(elev_rad)
+    # Use tan(elev) to preserve physical elevation angle (Pitch = arctan(z/r)).
+    # Using sin would compress the elevation: arctan(sin(elev)) ≠ elev.
+    z = r * np.tan(elev_rad)
 
     intensity = np.full(n, intensity_value, dtype=np.float32)
     ring = _approx_ring_from_z_and_r(z, r, num_lines=num_lines)
@@ -335,7 +339,8 @@ def _square_wall_records(
     v_angles = _get_vertical_angles(num_lines)
     elev_deg = rng.choice(v_angles, size=n)
     elev_rad = np.radians(elev_deg)
-    z = r * np.sin(elev_rad)
+    # Use tan(elev) to preserve physical elevation angle (Pitch = arctan(z/r)).
+    z = r * np.tan(elev_rad)
 
     intensity = np.full(n, intensity_value, dtype=np.float32)
     ring = _approx_ring_from_z_and_r(z, r, num_lines=num_lines)
@@ -370,8 +375,12 @@ def _square_beam_project_records(
     eps = 1e-6
     d_fake = scale_S / (np.abs(np.sin(theta_prime)) + np.abs(np.cos(theta_prime)) + eps)
 
-    norm = np.sqrt(x0 * x0 + y0 * y0 + z0 * z0)
-    norm_safe = np.where(norm < 1e-3, 1e-3, norm)
+    # Use 2D horizontal norm so the injected points project onto a VERTICAL wall
+    # (same elevation as the original beam), preserving the ring/topology.
+    # Using 3D norm would compress horizontal range for high-elevation beams,
+    # turning the square into a "diamond sphere" with warped edges.
+    norm_2d = np.sqrt(x0 * x0 + y0 * y0)
+    norm_safe = np.where(norm_2d < 1e-3, 1e-3, norm_2d)
 
     x = x0 / norm_safe * d_fake
     y = y0 / norm_safe * d_fake
