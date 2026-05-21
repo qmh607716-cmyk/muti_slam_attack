@@ -2,43 +2,53 @@
 
 ## 概述
 
-将 SLAMSpoof (ICRA 2025) LiDAR 欺骗攻击框架移植到 **LVI-SAM**（LiDAR-视觉-惯性紧耦合），并扩展为双模态（LiDAR+视觉）脆弱性分析。
+将 SLAMSpoof (ICRA 2025) LiDAR 欺骗攻击框架移植到 **LVI-SAM**（LiDAR-视觉-惯性紧耦合）。
 
-### 与原版 SLAMSpoof 的主要区别
+原版 SLAMSpoof 攻击 A-LOAM / KISS-ICP 等纯 LiDAR SLAM，共两种模式：
+- **`removal`**：HFR 噪声攻击，删除攻击窗口内点并注入随机噪声
+- **`static`**：圆柱形假墙注入，在固定距离上均匀注入伪造点
 
-| | 原版 | 本工作 |
+本工作在此基础上扩展到 LVI-SAM：
+
+| | 原版 SLAMSpoof | 本工作 |
 |---|---|---|
 | 目标 SLAM | A-LOAM / KISS-ICP（纯 LiDAR） | LVI-SAM（LiDAR-视觉-惯性） |
 | 保留 Topic | LiDAR + IMU | 全部（LiDAR、Camera、IMU、GPS） |
 | 点云格式 | xyz-only（破坏 ring/time） | 完整 22 字节 Velodyne 布局 |
-| SMVS | 仅 LiDAR | LiDAR + 视觉双模态融合（Bi-Vul） |
-| 攻击几何 | 随机均匀平面墙 | 4 种：随机平面 / 束投影 / 菱形集中 / L 形墙角 |
-| 动态墙振荡周期 | 手动指定 | 由 $M_{corr}$ 自动推导最优频率 |
+| SMVS | 仅 LiDAR（G-ICP Hessian 特征值） | LiDAR + 视觉双模态融合（Bi-Vul） |
+| 假墙几何 | 均匀随机圆柱墙 | 新增：束投影 / 菱形集中 / L 形墙角 |
+| 动态攻击 | 无 | 动墙注入 + 由 $M_{corr}$ 推导最优振荡周期 |
+
+> `square` / `corner` / 动态振荡由 D-SLAMSpoof 论文提出；双模态 SMVS（Bi-Vul）为本工作的扩展。
 
 ---
 
 ## 攻击模式
 
-### 1. `removal` — HFR 噪声攻击
+### 1. `removal` — HFR 噪声攻击（原版 SLAMSpoof）
 删除攻击窗口内真实点，注入随机噪声点。模拟硬件干扰或信号阻塞。
 
 ### 2. `static` — 假墙注入
-删除攻击窗口内真实点，注入伪造平面墙。4 种几何模型：
 
-| 模型 | 描述 | 几何约束 |
+**原版**：圆柱形均匀假墙（`original_random`），在 `wall_dist` 距离上均匀注入伪造点，几何约束分散。
+
+**本工作扩展**（由 D-SLAMSpoof 论文提出 `square`/`corner`，其余为本工作）：
+
+| 模型 | 来源 | 描述 |
 |---|---|---|
-| `original_random` | 均匀随机分布平面墙 | 分散在弧线上 |
-| `beam_project` | 沿原 scan line 方向投影到固定距离 | 继承原拓扑结构 |
-| `square` | D-SLAMSpoof 菱形集中几何 | 约束集中在边缘方向|
-| `corner` | L 形墙角| 两侧边缘面向 LiDAR |
+| `original_random` | 原版 | 均匀随机角度分布的圆柱墙，几何约束分散 |
+| `beam_project` | 本工作 | 沿原 scan line 方向投影到固定距离，继承 ring/time |
+| `square` | D-SLAMSpoof | 菱形集中几何（极坐标方程），约束集中在边缘方向 |
+| `corner` | D-SLAMSpoof | L 形墙角（square + rotate=0），两侧边缘面向 LiDAR |
 
+> **核心洞察（D-SLAMSpoof）**：均匀墙的约束分散在各方向上，对 scan matching 的"拉力"相互抵消；而 `square` 将所有最强约束集中在少数几个方向，产生持续定向漂移。
 
-### 3. `dynamic` — 动墙注入
-墙距离在 `[wall_distance_min, wall_distance_max]` 之间周期性振荡，最优周期由 $M_{corr}$ 自动推导：
+### 3. `dynamic` — 动墙注入（由 D-SLAMSpoof 论文提出）
+墙距离在 `[wall_distance_min, wall_distance_max]` 之间周期性振荡，周期由 $M_{corr}$ 自动推导：
 ```
 t_cycle = (d_max - d_min) / M_corr × Δt
 ```
-快于此周期 → 伪造点被滤除；慢于此周期 → 单位时间累积漂移减少。
+该周期是**最快且不被 outlier filtering 拒绝**的振荡频率。
 
 ---
 
