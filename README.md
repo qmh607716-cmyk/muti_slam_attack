@@ -1,4 +1,4 @@
-# SLAMSpoof for LVI-SAM
+# Muti-sensor SLAM Attack
 
 ## 概述
 
