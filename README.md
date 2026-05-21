@@ -41,7 +41,7 @@
 | `square` | D-SLAMSpoof | 菱形集中几何（极坐标方程），约束集中在边缘方向 |
 | `corner` | D-SLAMSpoof | L 形墙角（square + rotate=0），两侧边缘面向 LiDAR |
 
-> **核心洞察（D-SLAMSpoof）**：均匀墙的约束分散在各方向上，对 scan matching 的"拉力"相互抵消；而 `square` 将所有最强约束集中在少数几个方向，产生持续定向漂移。
+
 
 ### 3. `dynamic` — 动墙注入（由 D-SLAMSpoof 论文提出）
 墙距离在 `[wall_distance_min, wall_distance_max]` 之间周期性振荡，周期由 $M_{corr}$ 自动推导：
