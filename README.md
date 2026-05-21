@@ -170,8 +170,7 @@ python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_from_bimodal.py \
 ```bash
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel_catkin_tools/setup.bash
-roslaunch slamspoof_icra rosbag_editer_lvisam.launch \
-    config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam.json
+roslaunch slamspoof_icra rosbag_editer_lvisam.launch config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam_handheld.json
 ```
 
 ---

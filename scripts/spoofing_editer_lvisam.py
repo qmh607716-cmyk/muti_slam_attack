@@ -108,8 +108,8 @@ class StageDState:
             "injected_points_max": 0,
         }
 
-        rospy.loginfo(f"[Stage D] Loaded reference trajectory: {self.ref_file}")
-        rospy.loginfo(f"[Stage D] Reference poses: {len(df)}")
+        print(f"[Stage D] Loaded reference trajectory: {self.ref_file}")
+        print(f"[Stage D] Reference poses: {len(df)}")
 
     def lookup(self, bag_timestamp_ns: int):
         """
@@ -245,12 +245,12 @@ def main():
     spoofing_cycle  = float(config["main"].get("spoofing_cycle", 2.0))
 
     if spoofing_mode not in ("removal", "static", "dynamic"):
-        rospy.logwarn(
-            f"Unknown spoofing_mode '{spoofing_mode}', using 'removal'."
+        print(
+            f"[spoofing_editer_lvisam] WARNING: Unknown spoofing_mode '{spoofing_mode}', using 'removal'."
         )
         spoofing_mode = "removal"
 
-    rospy.loginfo(
+    print(
         f"[spoofing_editer_lvisam] mode={spoofing_mode}  "
         f"spoofing_range={spoofing_range}°  "
         f"wall_dist={wall_dist}m  "
@@ -278,7 +278,7 @@ def main():
 
             # ── Create writer connection once per topic ────────────────────────
             if connection.topic not in connections:
-                rospy.loginfo(
+                print(
                     f"[spoofing_editer_lvisam] add connection: {connection.topic}"
                 )
                 connections[connection.topic] = writer.add_connection(
@@ -405,28 +405,28 @@ def main():
     s = state.stats
     n = s["total_frames"]
     t = s["triggered_frames"]
-    rospy.loginfo("=" * 54)
-    rospy.loginfo("  spoofing_editer_lvisam summary")
-    rospy.loginfo("=" * 54)
-    rospy.loginfo(f"  Mode                 : {spoofing_mode}")
-    rospy.loginfo(f"  Total frames         : {n}")
-    rospy.loginfo(f"  Triggered frames     : {t}  ({100.0 * t / max(n, 1):.4f}%)")
+    print("=" * 54)
+    print("  spoofing_editer_lvisam summary")
+    print("=" * 54)
+    print(f"  Mode                 : {spoofing_mode}")
+    print(f"  Total frames         : {n}")
+    print(f"  Triggered frames     : {t}  ({100.0 * t / max(n, 1):.4f}%)")
     if t > 0:
-        rospy.loginfo(
+        print(
             f"  Mean removed/frame   : {s['removed_points_sum'] / t:.1f}"
         )
-        rospy.loginfo(
+        print(
             f"  Max removed (frame)  : {s['removed_points_max']}"
         )
         if spoofing_mode != "removal":
-            rospy.loginfo(
+            print(
                 f"  Mean injected/frame  : {s['injected_points_sum'] / t:.1f}"
             )
-            rospy.loginfo(
+            print(
                 f"  Max injected (frame) : {s['injected_points_max']}"
             )
-    rospy.loginfo(f"  Output bag           : {output_file}")
-    rospy.loginfo("=" * 54)
+    print(f"  Output bag           : {output_file}")
+    print("=" * 54)
 
 
 if __name__ == "__main__":
