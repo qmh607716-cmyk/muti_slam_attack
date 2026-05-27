@@ -12,9 +12,9 @@
 
 | | 原版 SLAMSpoof | 本工作 |
 |---|---|---|
-| 目标 SLAM | A-LOAM / KISS-ICP（纯 LiDAR） | LVI-SAM（LiDAR-视觉-惯性） |
-| 保留 Topic | LiDAR + IMU | 全部（LiDAR、Camera、IMU、GPS） |
-| 点云格式 | xyz-only（破坏 ring/time） | 完整 22 字节 Velodyne 布局 |
+| 目标 SLAM | A-LOAM / KISS-ICP（纯 LiDAR） | LVI-SAM（LiDAR-视觉） |
+| 保留 Topic | LiDAR + IMU | LiDAR、Camera、IMU、GPS|
+| 点云格式 | xyz-only | 完整 22 字节 Velodyne 布局 |
 | SMVS | 仅 LiDAR（G-ICP Hessian 特征值） | LiDAR + 视觉双模态融合（Bi-Vul） |
 | 假墙几何 | 均匀随机圆柱墙 | 新增：束投影 / 菱形集中 / L 形墙角 |
 | 动态攻击 | 无 | 动墙注入 + 由 $M_{corr}$ 推导最优振荡周期 |
@@ -25,7 +25,7 @@
 
 ## 攻击模式
 
-### 1. `removal` — HFR 噪声攻击（原版 SLAMSpoof）
+### 1. `removal` — HFR 噪声攻击
 删除攻击窗口内真实点，注入随机噪声点。模拟硬件干扰或信号阻塞。
 
 ### 2. `static` — 假墙注入
@@ -43,7 +43,7 @@
 
 
 
-### 3. `dynamic` — 动墙注入（由 D-SLAMSpoof 论文提出）
+### 3. `dynamic` — 动墙注入
 墙距离在 `[wall_distance_min, wall_distance_max]` 之间周期性振荡，周期由 $M_{corr}$ 自动推导：
 ```
 t_cycle = (d_max - d_min) / M_corr × Δt
