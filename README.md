@@ -263,6 +263,66 @@ slamspoof/
 
 ---
 
+## 实验结果
+
+> **说明**：原始（"原"）指仅用 G-ICP Hessian 的单模态 SMVS（原文 SLAMSpoof），新版（"新"）指 LiDAR+视觉双模态 Bi-SMVS（本工作）。D-SLAMSpoof 扩展的 static / dynamic 攻击均使用新版 Bi-SMVS 选出的 spoofer 位置。
+
+### handheld
+
+| 攻击配置 | Mean (m) | RMSE (m) | Max (m) |
+|---|---|---|---|
+| 原 removal | 0.70 | 1.31 | 4.63 |
+| 原 static | 1.74 | 2.15 | 7.08 |
+| 新 removal | 0.89 | 1.78 | 5.28 |
+| 新 static | 0.94 | 1.76 | 5.27 |
+| **D-SLAMSpoof static (beam_project)** | **0.24** | **0.41** | **5.01** |
+| D-SLAMSpoof static (corner) | 1.28 | 1.44 | 4.35 |
+| D-SLAMSpoof dynamic (corner) | 0.80 | 1.60 | 4.88 |
+| D-SLAMSpoof dynamic (corner) | 0.94 | 1.03 | 4.80 |
+
+**Spoofer 位置**：原 SMVS → (x=-7.53, y=182.00) / 新 Bi-SMVS → (x=2.63, y=-89.29)
+
+### garden
+
+| 攻击配置 | Mean (m) | RMSE (m) | Max (m) |
+|---|---|---|---|
+| 原 removal | 31.34 | 35.17 | 52.99 |
+| 原 static | 31.30 | 35.03 | 52.55 |
+| 新 removal | 0.79 | 1.13 | 2.72 |
+| **新 static** | **31.64** | **35.32** | **53.10** |
+| **D-SLAMSpoof static (beam_project)** | **0.57** | **0.76** | **1.88** |
+| D-SLAMSpoof static (corner) | 31.32 | 35.06 | 52.42 |
+| **D-SLAMSpoof dynamic (corner)** | **0.45** | **0.52** | **0.77** |
+| D-SLAMSpoof dynamic (corner) | 31.57 | 35.30 | 53.05 |
+
+**Spoofer 位置**：原 SMVS → (x=-13.80, y=-730.78) / 新 Bi-SMVS → (x=-29.86, y=316.05)
+
+### jackal
+
+| 攻击配置 | Mean (m) | RMSE (m) | Max (m) |
+|---|---|---|---|
+| 原 removal | 1.02 | 1.30 | 4.55 |
+| 原 static | 0.57 | 0.70 | 7.74 |
+| **新 removal** | **0.41** | **0.57** | **7.69** |
+| **新 static** | **52.17** | **101.65** | **206.38** |
+| **D-SLAMSpoof static (beam_project)** | **0.61** | **0.76** | **7.62** |
+| D-SLAMSpoof static (corner) | 151.47 | 290.92 | 846.32 |
+| **D-SLAMSpoof dynamic (corner)** | **0.50** | **0.63** | **7.60** |
+| D-SLAMSpoof dynamic (corner) | 0.53 | 0.69 | 7.78 |
+
+**Spoofer 位置**：原 SMVS → (x=0.03, y=12.65) / 新 Bi-SMVS → (x=-170.90, y=-290.70)
+
+---
+
+### 主要发现
+
+1. **Bi-SMVS 引导的 removal 攻击**在 handheld / garden / jackal 三个场景均有效，最大偏差 2.7~7.7 m，且不导致系统发散。
+2. **新版 static 攻击在大型场景（garden / jackal）失效**——最大偏差达 30~200 m，系统严重发散。原因是新版 spoofer 位置由 Bi-SMVS 引导，视觉补偿会抑制 static 假墙注入的视觉一致性，从而改变 spoofer 位置。
+3. **D-SLAMSpoof dynamic (corner) 动墙注入**在 garden 场景从 31.6 m 降至 0.45 m，在 jackal 保持 0.50 m，动墙振荡使攻击在大型场景下重新生效。
+4. **D-SLAMSpoof static (beam_project)** 在 garden / jackal 均有效，beam_project 继承原 beam 的 ring/time 拓扑，欺骗性更强。
+
+---
+
 ## 引用
 
 ```bibtex

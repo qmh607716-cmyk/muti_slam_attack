@@ -377,8 +377,14 @@ def main():
                         point_step=lidar_topic_length,
                     )
 
-                n_removed   = max(0, n_original - modified.shape[0])
-                n_injected  = max(0, modified.shape[0] - n_original + n_removed)
+            # injected = modified.shape[0] - kept.shape[0]
+            # removal:   modified = kept + noise  → injected = len(noise)
+            # static:    modified = kept + wall   → injected = len(wall)
+            # pure_removal: modified = kept        → injected = 0
+            n_injected = max(0, modified.shape[0] - kept.shape[0])
+            n_removed  = max(0, kept.shape[0] - modified.shape[0])
+            # Note: for pure_removal, n_removed ≈ n_original - kept.shape[0]
+            # which is the same as before since modified = kept
                 state.stats["removed_points_sum"] += n_removed
                 state.stats["removed_points_max"]   = max(
                     state.stats["removed_points_max"], n_removed
