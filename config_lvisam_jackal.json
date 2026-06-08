@@ -1,11 +1,11 @@
 {
   "main": {
-    "input_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/jackal.bag",
+    "input_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/original/jackal_original_traj.bag",
     "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/attack_static/jackal_attack_static.bag",
     "reference_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/original/jackal_original_traj.csv",
     "spoofing_mode": "static",
-    "spoofer_x": -72.7253493688483,
-    "spoofer_y": 1.99308208917627,
+    "spoofer_x": -62.00968216770279,
+    "spoofer_y":  50.69286210017656,
     "distance_threshold": 15.0,
     "lidar_topic": "/points_raw",
     "lidar_topic_length": 22,

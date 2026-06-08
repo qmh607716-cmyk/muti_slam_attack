@@ -41,6 +41,7 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from functions import spoofing_sim_lvisam
+import registration_separated
 
 
 # ---------------------------------------------------------------------------
@@ -74,9 +75,13 @@ class StageDState:
     """
     Holds the reference trajectory and runtime state for Stage D
     trajectory-guided spoofing.
+
+    For adaptive injection, optionally loads pre-computed Hessian eigenvector
+    data (from calc_hessian_eigenvector) indexed by frame timestamp.
     """
 
-    def __init__(self, config: dict, rng: np.random.Generator):
+    def __init__(self, config: dict, rng: np.random.Generator,
+                 load_eigenvec: bool = False):
         self.rng = rng
 
         self.ref_file = config["main"].get("reference_file")
@@ -111,6 +116,30 @@ class StageDState:
         print(f"[Stage D] Loaded reference trajectory: {self.ref_file}")
         print(f"[Stage D] Reference poses: {len(df)}")
 
+        # ── Adaptive injection: load Hessian eigenvector pre-computation ────────
+        self.eigenvec_data: Optional[dict] = None
+        if load_eigenvec:
+            eig_file = config["main"].get("eigenvector_csv")
+            if eig_file and os.path.exists(eig_file):
+                eig_df = pd.read_csv(eig_file)
+                self.eigenvec_data = {
+                    "time":       eig_df["time"].to_numpy(),
+                    "eigenvec_x": eig_df["eigenvec_x"].to_numpy()
+                                 if "eigenvec_x" in eig_df.columns else None,
+                    "eigenvec_y": eig_df["eigenvec_y"].to_numpy()
+                                 if "eigenvec_y" in eig_df.columns else None,
+                    "eigenvec_z": eig_df["eigenvec_z"].to_numpy()
+                                 if "eigenvec_z" in eig_df.columns else None,
+                    "dot_eig":    eig_df["dot_eig"].to_numpy()
+                                 if "dot_eig" in eig_df.columns else None,
+                }
+                print(f"[Stage D] Loaded eigenvector pre-computation: {eig_file}")
+            else:
+                print(
+                    f"[Stage D] WARNING: eigenvector_csv='{eig_file}' "
+                    f"not found — adaptive injection falls back to rotate_rad=0"
+                )
+
     def lookup(self, bag_timestamp_ns: int):
         """
         Return (x, y, z, yaw, bag_rel_sec) for the given bag timestamp.
@@ -135,6 +164,40 @@ class StageDState:
         )
 
         return x, y, z, yaw, rel_sec
+
+    def lookup_eigenvec(self, bag_timestamp_ns: int):
+        """
+        Return (eigenvec_xyz, dot_eig) for the given bag timestamp.
+
+        eigenvec_xyz: (M, 3) numpy array of per-point translation eigenvectors
+        dot_eig:     (M,) numpy array of dot products
+
+        Returns (None, None) if eigenvector data is not loaded or lookup fails.
+        """
+        if self.eigenvec_data is None:
+            return None, None
+
+        now_sec = bag_timestamp_ns / 1e9 if bag_timestamp_ns > 1e12 else float(bag_timestamp_ns)
+        if self.bag_start_sec is None:
+            self.bag_start_sec = now_sec
+        rel_sec = now_sec - self.bag_start_sec
+        query_t = self.ref_t0 + rel_sec
+
+        ev = self.eigenvec_data
+        idx = int(np.argmin(np.abs(ev["time"] - query_t)))
+
+        if ev["eigenvec_x"] is not None:
+            ex = ev["eigenvec_x"][idx] if idx < len(ev["eigenvec_x"]) else 0.0
+            ey = ev["eigenvec_y"][idx] if idx < len(ev["eigenvec_y"]) else 0.0
+            ez = ev["eigenvec_z"][idx] if idx < len(ev["eigenvec_z"]) else 0.0
+            eigenvec_xyz = np.array([[ex, ey, ez]], dtype=np.float64)
+        else:
+            eigenvec_xyz = np.zeros((1, 3), dtype=np.float64)
+
+        dot_eig = ev["dot_eig"][idx] if ev["dot_eig"] is not None and idx < len(ev["dot_eig"]) else 0.0
+        dot_eig = np.atleast_1d(np.array(dot_eig, dtype=np.float64))
+
+        return eigenvec_xyz, dot_eig
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +307,7 @@ def main():
     wall_dist_max   = float(config["main"].get("wall_distance_max", 25.0))
     spoofing_cycle  = float(config["main"].get("spoofing_cycle", 2.0))
 
-    if spoofing_mode not in ("removal", "static", "dynamic"):
+    if spoofing_mode not in ("removal", "static", "dynamic", "adaptive"):
         print(
             f"[spoofing_editer_lvisam] WARNING: Unknown spoofing_mode '{spoofing_mode}', using 'removal'."
         )
@@ -265,7 +328,9 @@ def main():
     # ── Initialise state (with a seeded RNG for reproducibility) ──────────
     rng_seed = int(config["main"].get("rng_seed", 42))
     rng = np.random.default_rng(rng_seed)
-    state = StageDState(config, rng)
+    # For adaptive mode, load pre-computed Hessian eigenvector data
+    load_eigenvec = spoofing_mode == "adaptive"
+    state = StageDState(config, rng, load_eigenvec=load_eigenvec)
 
     lidar_topic_length = int(config["main"].get("lidar_topic_length", 22))
 
@@ -322,6 +387,14 @@ def main():
                 x, y, z = binary_to_xyz(bin_points)
                 n_original = bin_points.shape[0]
 
+                # Compute kept points (needed for stats)
+                mask_keep = ~spoofing_sim_lvisam.polar_mask_2d(
+                    spoofing_sim_lvisam._read_float32(bin_points, 0, 4),
+                    spoofing_sim_lvisam._read_float32(bin_points, 4, 8),
+                    center_deg, half_range_deg
+                )
+                kept = bin_points[mask_keep]
+
                 if spoofing_mode == "removal":
                     modified = spoofing_sim_lvisam.removal_injection(
                         bin_points,
@@ -377,14 +450,37 @@ def main():
                         point_step=lidar_topic_length,
                     )
 
-            # injected = modified.shape[0] - kept.shape[0]
-            # removal:   modified = kept + noise  → injected = len(noise)
-            # static:    modified = kept + wall   → injected = len(wall)
-            # pure_removal: modified = kept        → injected = 0
-            n_injected = max(0, modified.shape[0] - kept.shape[0])
-            n_removed  = max(0, kept.shape[0] - modified.shape[0])
-            # Note: for pure_removal, n_removed ≈ n_original - kept.shape[0]
-            # which is the same as before since modified = kept
+                elif spoofing_mode == "adaptive":
+                    eigenvec_xyz, dot_eig = state.lookup_eigenvec(timestamp)
+                    if eigenvec_xyz is None or dot_eig is None:
+                        eigenvec_xyz = np.zeros((1, 3), dtype=np.float64)
+                        dot_eig = np.ones(1, dtype=np.float64)
+                    modified = spoofing_sim_lvisam.adaptive_injection(
+                        bin_points,
+                        center_deg,
+                        half_range_deg,
+                        bag_rel_sec,
+                        eigenvec_xyz,
+                        dot_eig,
+                        rng,
+                        base_wall_dist=wall_dist,
+                        wall_dist_min=wall_dist_min,
+                        wall_dist_max=wall_dist_max,
+                        spoofing_cycle=spoofing_cycle,
+                        M_corr=M_corr,
+                        point_count_model=point_count_model,
+                        horizontal_resolution=horizontal_resolution,
+                        vertical_lines=vertical_lines,
+                        wall_intensity=wall_intensity,
+                        square_scale_S=square_scale_S,
+                        lidar_scan_period=lidar_scan_period,
+                        auto_cycle=auto_cycle,
+                        point_step=lidar_topic_length,
+                    )
+
+                # Statistics
+                n_injected = max(0, modified.shape[0] - kept.shape[0])
+                n_removed  = max(0, kept.shape[0] - modified.shape[0])
                 state.stats["removed_points_sum"] += n_removed
                 state.stats["removed_points_max"]   = max(
                     state.stats["removed_points_max"], n_removed
@@ -393,6 +489,7 @@ def main():
                 state.stats["injected_points_max"]  = max(
                     state.stats["injected_points_max"], n_injected
                 )
+
             else:
                 modified = bin_points
 

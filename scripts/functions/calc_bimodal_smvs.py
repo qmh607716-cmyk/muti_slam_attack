@@ -8,18 +8,19 @@ Bimodal (LiDAR + Visual) Scan Matching Vulnerability Score.
 Core framework:
     L-Vul[k] : LiDAR-only vulnerability (GICP Hessian eigenvalue bucket)
     V-Vul[k] : Visual compensation capability (camera quality per bucket)
-    Bi-Vul[k] = L-Vul[k] × (1 - V-Vul[k])
+    Bi-Vul[k] = L-Vul[k] × (1 - V-Vul[k] × L-Vul_norm[k])
+    L-Vul_norm[k] = L-Vul[k] / l_vul_max  (per-frame max for normalisation)
 
     Visual quality good  → V-Vul high  → attack weakened  → Bi-Vul low
     Visual quality poor / attack outside FOV → V-Vul low → attack strong → Bi-Vul ≈ L-Vul
 
-V-Vul model (per-bucket Q[k]):
+V-Vul model:
     V-Vul[k] = γ × cam_coverage[k] × Q[k]
     Q[k] = w_track × feature_density[k]
          + w_optical × flow_consistency[k]
-         + w_depth × depth_quality
-         + w_spatial × spatial_dist
-         + w_parallax × parallax
+         + w_depth × depth_quality          # global scalar (same for all buckets)
+         + w_spatial × spatial_dist         # global scalar (same for all buckets)
+         + w_parallax × parallax            # global scalar (same for all buckets)
 
     Where:
       - cam_coverage: hierarchical FOV (center=1.0, edge=0.7, blind=0.0)
@@ -447,6 +448,36 @@ def frame_visual_smvs(v_vul, step_deg=5.0, d_th=None) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Spatial Coherence Factor (SCF) — penalises "void" frames
+# ---------------------------------------------------------------------------
+
+def spatial_coherence_factor(l_vul: np.ndarray) -> float:
+    """
+    Spatial Coherence Factor: penalises frames where LiDAR provides weak
+    structure across all directions.
+
+    SCF = mean(l_vul) / peak(l_vul)
+
+    Interpretation:
+      - All directions weak  → mean low, peak low  → SCF → 0  → strong penalise
+      - One direction dominant + others weak → mean << peak → SCF small → penalise
+      - All directions equally strong → mean ≈ peak → SCF ≈ 1 → no penalise
+
+    The key insight: if mean(l_vul) is very low (~15), the LiDAR has no
+    reliable structure to localise against → even a high L-Vul direction points
+    into "void" → spoofer cannot reach it.
+
+    Returns:
+        SCF in (0, 1], where 1 = no penalisation
+    """
+    peak = float(np.max(l_vul))
+    mean = float(np.mean(l_vul))
+    if peak < 1e-9:
+        return 0.0
+    return mean / peak
+
+
+# ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 
@@ -487,7 +518,7 @@ class VVulEMAFilter:
             self._prev = v_vul.copy()
             return v_vul.copy()
         smoothed = self.alpha * v_vul + (1.0 - self.alpha) * self._prev
-        self._prev = v_vul.copy()
+        self._prev = smoothed.copy()
         return smoothed
 
     def reset(self):

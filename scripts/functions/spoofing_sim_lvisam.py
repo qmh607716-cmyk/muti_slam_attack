@@ -725,3 +725,265 @@ def injection_main(pointcloud, largest_score_angle, spoofing_range, wall_dist):
 
 def dynamic_injection_main(pointcloud, timestamp, largest_score_angle, spoofing_range):
     raise NotImplementedError("Use dynamic_injection() for LVI-SAM editor.")
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Injection: Hessian-Eigenvector-Guided Attack Geometry
+# ---------------------------------------------------------------------------
+
+def _adaptive_wall_distance(
+    l_vul_in_window: float,
+    l_vul_global: float,
+    base_wall_dist: float,
+    wall_dist_min: float,
+    wall_dist_max: float,
+) -> float:
+    """
+    Compute adaptive wall distance based on local vulnerability strength.
+
+    D-SLAMSpoof principle: weaker local structure → more room for injected
+    constraints to dominate → place wall closer (stronger pull toward fake).
+    However, placing it TOO close may be unrealistic (LiDAR would see it).
+    We use a sigmoid-like mapping: low L-Vul → closer wall.
+
+    Args:
+        l_vul_in_window: average L-Vul (dot_eigen_value) in the attack window
+        l_vul_global:    global average L-Vul for normalisation
+        base_wall_dist:  user-specified base distance
+        wall_dist_min:   minimum allowed injection distance
+        wall_dist_max:   maximum allowed injection distance
+
+    Returns:
+        adaptive wall distance in metres
+    """
+    if l_vul_global <= 0:
+        return base_wall_dist
+
+    ratio = l_vul_in_window / l_vul_global
+
+    # Sigmoid compression: ratio 0→1 maps to dist in [base*0.6, base*1.4]
+    # Clamp ratio to avoid overflow
+    ratio = float(np.clip(ratio, 0.01, 10.0))
+    t = 1.0 / (1.0 + np.exp(-3.0 * (ratio - 1.0)))
+
+    dist = base_wall_dist * (0.6 + 0.8 * t)
+    return float(np.clip(dist, wall_dist_min, wall_dist_max))
+
+
+def _eigenvector_to_rotate_rad(
+    eigenvec_xyz: np.ndarray,
+    dot_eig: np.ndarray,
+    center_deg: float,
+    half_range_deg: float,
+) -> float:
+    """
+    Infer the optimal injection shape orientation (rotate_rad) from Hessian eigenvectors.
+
+    Key insight: each point's translation eigenvector gives the dominant direction
+    along which that point resists motion. Points with low dot_eigen_value have
+    the global minimum eigenvector direction dominating their local Hessian, meaning
+    they are the weakest constraints. Injecting a fake wall perpendicular to the
+    minimum-eigenvalue direction forces scan matching to accumulate drift in
+    that specific direction.
+
+    Algorithm:
+      1. Keep only points in the attack angular window (where injection happens).
+      2. Filter to those with low dot_eigen_value (weakest 30% of constraints).
+      3. Compute the median 2D azimuth of their eigenvector xy-projection.
+      4. Convert to rotate_rad: the eigenvector direction is the direction of
+         weak constraint; we want the injection shape to have its edge
+         perpendicular to this so that residuals point along the eigenvector.
+
+    rotate_rad = 0    → corner shape with edges along x/y axes
+    rotate_rad = θ    → corner rotated by θ → edge perpendicular to θ
+
+    Returns rotate_rad in radians.
+    """
+    if eigenvec_xyz.shape[0] == 0 or dot_eig.shape[0] == 0:
+        return 0.0
+
+    theta_deg = (np.degrees(np.arctan2(eigenvec_xyz[:, 1], eigenvec_xyz[:, 0])) + 180.0) % 360.0
+    center_mod = center_deg % 360.0
+    delta = (theta_deg - center_mod + 180.0) % 360.0 - 180.0
+    in_window = np.abs(delta) <= half_range_deg
+
+    if not np.any(in_window):
+        return 0.0
+
+    eig_in = eigenvec_xyz[in_window]
+    dot_in = dot_eig[in_window]
+
+    threshold = np.percentile(dot_in, 30.0)
+    weak_mask = dot_in <= threshold
+
+    if not np.any(weak_mask):
+        weak_mask = dot_in == dot_in.min()
+
+    eig_weak = eig_in[weak_mask]
+
+    median_x = float(np.median(eig_weak[:, 0]))
+    median_y = float(np.median(eig_weak[:, 1]))
+
+    if abs(median_x) < 1e-6 and abs(median_y) < 1e-6:
+        return 0.0
+
+    eig_theta = np.arctan2(median_y, median_x)
+
+    rotate_rad = eig_theta + np.pi / 4.0
+    return float(rotate_rad)
+
+
+def adaptive_injection(
+    bin_points: np.ndarray,
+    center_deg: float,
+    half_range_deg: float,
+    timestamp: float,
+    eigenvec_xyz: np.ndarray,
+    dot_eig: np.ndarray,
+    rng: np.random.Generator,
+    base_wall_dist: float = 15.0,
+    wall_dist_min: float = 5.0,
+    wall_dist_max: float = 25.0,
+    spoofing_cycle: float = None,
+    M_corr: float = 1.0,
+    point_count_model: str = "original",
+    horizontal_resolution: float = 0.1,
+    vertical_lines: float = 16.0,
+    wall_intensity: float = 120.0,
+    square_scale_S: float = None,
+    lidar_scan_period: float = 0.1,
+    auto_cycle: bool = True,
+    point_step: int = 22,
+) -> np.ndarray:
+    """
+    Adaptive Injection: dynamically chooses injection geometry guided by
+    per-frame G-ICP Hessian eigenvector analysis.
+
+    This is the core of the Hessian-eigenvector-guided adaptive attack.
+    For each frame, the function:
+      1. Computes the optimal injection shape orientation (rotate_rad) from
+         Hessian eigenvectors of the weak-constraint points in the window.
+      2. Computes an adaptive wall distance from local L-Vul strength.
+      3. Optionally oscillates the wall radially (D-SLAMSpoof Oscillating Injection)
+         using the optimal cycle derived from M_corr.
+      4. Injects a corner-shaped (rotate_rad-oriented) false wall.
+
+    The key innovation over D-SLAMSpoof:
+      - D-SLAMSpoof uses a FIXED rotate_rad (0 for corner, pi/4 for planar).
+      - adaptive_injection infers rotate_rad PER FRAME from the G-ICP Hessian,
+        automatically aligning with the actual weakest constraint direction.
+
+    Args:
+        bin_points:       raw point cloud (N, point_step) uint8 binary
+        center_deg:       attack angle in LiDAR frame (degrees, [0, 360))
+        half_range_deg:   half-width of attack angular window
+        timestamp:        bag relative time (seconds) for oscillation
+        eigenvec_xyz:     (M, 3) per-point translation eigenvector xyz
+        dot_eig:         (M,) per-point dot(global_min_vec, local_max_vec)
+        rng:              seeded RNG
+        base_wall_dist:   base injection distance (metres)
+        wall_dist_min:    minimum oscillation bound
+        wall_dist_max:    maximum oscillation bound
+        spoofing_cycle:   oscillation period; if None and auto_cycle=True,
+                          computed from M_corr (D-SLAMSpoof Eq. 4)
+        M_corr:           max correspondence distance for auto_cycle (m)
+        point_count_model: "original" | "equal_replace" | "pure_removal"
+        horizontal_resolution: degrees per fake point (for count model)
+        vertical_lines:   number of LiDAR channels (for count model)
+        wall_intensity:   intensity value for injected points
+        square_scale_S:   polar equation scale S; if None, auto-computed
+        lidar_scan_period: LiDAR scan period (s)
+        auto_cycle:       if True, compute optimal t_cycle from M_corr
+        point_step:       22 for Velodyne, 18 for Livox
+
+    Returns:
+        modified point cloud as (N', point_step) uint8 binary
+    """
+    x = _read_float32(bin_points, 0, 4)
+    y = _read_float32(bin_points, 4, 8)
+    z = _read_float32(bin_points, 8, 12)
+
+    mask = polar_mask_2d(x, y, center_deg, half_range_deg)
+    kept = bin_points[~mask]
+
+    if point_count_model == "pure_removal":
+        return kept
+
+    n_removed = int(mask.sum())
+
+    if point_count_model == "equal_replace":
+        n_wall = n_removed
+    else:
+        spoofing_range_deg = half_range_deg * 2.0
+        n_wall = _original_static_count(
+            spoofing_range_deg,
+            horizontal_resolution,
+            vertical_lines,
+        )
+
+    if n_wall <= 0:
+        return kept
+
+    # ── Step 1: Eigenvector-guided rotate_rad ──────────────────────────────
+    rotate_rad = _eigenvector_to_rotate_rad(eigenvec_xyz, dot_eig, center_deg, half_range_deg)
+
+    # ── Step 2: L-Vul-guided adaptive wall distance ────────────────────────
+    dot_in_window = np.zeros(len(dot_eig), dtype=bool) if len(dot_eig) == 0 else None
+
+    if dot_in_window is not None:
+        theta_pts = (np.degrees(np.arctan2(y[mask], x[mask])) + 180.0) % 360.0
+        center_mod = center_deg % 360.0
+        delta_pts = (theta_pts - center_mod + 180.0) % 360.0 - 180.0
+
+        if dot_eig.shape[0] > 0 and eigenvec_xyz.shape[0] == dot_eig.shape[0]:
+            theta_eig = (np.degrees(np.arctan2(eigenvec_xyz[:, 1], eigenvec_xyz[:, 0])) + 180.0) % 360.0
+            delta_eig = (theta_eig - center_mod + 180.0) % 360.0 - 180.0
+            eig_in_window = np.abs(delta_eig) <= half_range_deg
+
+            dot_in_window = dot_eig[eig_in_window] if np.any(eig_in_window) else dot_eig
+        else:
+            dot_in_window = dot_eig
+
+        l_vul_local = float(np.mean(dot_in_window)) if len(dot_in_window) > 0 else 0.5
+        l_vul_global = float(np.mean(dot_eig)) if len(dot_eig) > 0 else 1.0
+    else:
+        l_vul_local = 0.5
+        l_vul_global = 1.0
+
+    adaptive_dist = _adaptive_wall_distance(
+        l_vul_local, l_vul_global,
+        base_wall_dist, wall_dist_min, wall_dist_max,
+    )
+
+    # ── Step 3: Oscillating Injection ───────────────────────────────────────
+    if auto_cycle and spoofing_cycle is None:
+        spoofing_cycle = _optimal_cycle_from_mcorr(
+            wall_dist_min, wall_dist_max, M_corr, lidar_scan_period,
+        )
+    elif spoofing_cycle is None:
+        spoofing_cycle = 2.0
+
+    frac = (timestamp % spoofing_cycle) / spoofing_cycle
+    wall_dist = (wall_dist_max - wall_dist_min) * frac + wall_dist_min
+
+    # ── Step 4: Square geometry with adaptive rotate_rad ───────────────────
+    scale_S = square_scale_S if square_scale_S is not None else adaptive_dist * np.sqrt(2.0)
+
+    wall_records = _square_wall_records(
+        n_wall,
+        scale_S,
+        center_deg,
+        half_range_deg,
+        rotate_rad,
+        rng,
+        intensity_value=wall_intensity,
+        num_lines=int(vertical_lines),
+        point_step=point_step,
+        lidar_scan_period=lidar_scan_period,
+    )
+
+    if kept.shape[0] == 0:
+        return wall_records
+    if wall_records.shape[0] == 0:
+        return kept
+    return np.concatenate([kept, wall_records], axis=0)

@@ -79,9 +79,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--smvs", required=True,
-                        help="SMVS CSV path. Required columns: timestamp, x, y, z, smvs")
+                        help="SMVS CSV path. Required columns: timestamp, x, y, z, smvs (x/y/z are auto-filled from --ref-traj if missing)")
     parser.add_argument("--vul", required=True,
-                        help="Vulnerability-direction CSV path. Required columns: x, y, z, vec_x, vec_y, smvs")
+                        help="Vulnerability-direction CSV path. Required columns: x, y, z, vec_x, vec_y, smvs (x/y/z are auto-filled from --ref-traj if missing)")
+    parser.add_argument("--ref-traj", default=None,
+                        help="Reference trajectory CSV with time,x,y,z columns. Used to fill missing x/y/z in SMVS and vul CSVs via timestamp matching.")
     parser.add_argument("--output", default=None,
                         help="Output JSON path. If omitted, only prints the result.")
 
@@ -136,27 +138,88 @@ def require_columns(df: pd.DataFrame, required: Iterable[str], name: str) -> Non
         raise SystemExit(f"{name} missing required columns: {sorted(missing)}")
 
 
-def load_csvs(smvs_path: str, vul_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_csvs(
+    smvs_path: str, vul_path: str, ref_traj_path: Optional[str] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     smvs_df = pd.read_csv(smvs_path)
     vul_df = pd.read_csv(vul_path)
 
-    require_columns(smvs_df, {"timestamp", "x", "y", "z", "smvs"}, "SMVS CSV")
-    require_columns(vul_df, {"x", "y", "z", "vec_x", "vec_y", "smvs"}, "Vulnerability CSV")
+    require_columns(smvs_df, {"timestamp", "smvs"}, "SMVS CSV")
+    require_columns(vul_df, {"vec_x", "vec_y", "smvs"}, "Vulnerability CSV")
 
     smvs_df = smvs_df.copy()
     vul_df = vul_df.copy()
 
-    # Keep original row indices for diagnostics.
     smvs_df["_row_index"] = np.arange(len(smvs_df), dtype=int)
     vul_df["_row_index"] = np.arange(len(vul_df), dtype=int)
 
-    # Ensure numeric columns.
-    for col in ["timestamp", "x", "y", "z", "smvs"]:
+    for col in ["timestamp", "smvs"]:
         smvs_df[col] = pd.to_numeric(smvs_df[col], errors="coerce")
-    for col in ["x", "y", "z", "vec_x", "vec_y", "smvs"]:
+    for col in ["vec_x", "vec_y", "smvs"]:
         vul_df[col] = pd.to_numeric(vul_df[col], errors="coerce")
     if "timestamp" in vul_df.columns:
         vul_df["timestamp"] = pd.to_numeric(vul_df["timestamp"], errors="coerce")
+
+    # Fill missing x/y/z from reference trajectory if needed
+    need_traj_fill = (
+        "x" not in smvs_df.columns or smvs_df["x"].isna().any() or
+        "x" not in vul_df.columns or vul_df["x"].isna().any()
+    )
+    if need_traj_fill:
+        if ref_traj_path is None:
+            raise SystemExit(
+                "SMVS or vul CSV is missing x/y/z columns/values, "
+                "but --ref-traj was not provided."
+            )
+        traj_df = pd.read_csv(ref_traj_path)
+        n_traj = len(traj_df)
+        traj_time = traj_df["time"].values
+        traj_x = traj_df["x"].values
+        traj_y = traj_df["y"].values
+        traj_z = traj_df["z"].values
+
+        # Vectorized fill for SMVS: index -> ref_traj row (capped), overflow -> nearest by time
+        if "x" not in smvs_df.columns or smvs_df["x"].isna().any():
+            row_idx = smvs_df["_row_index"].values.astype(int)
+            valid = row_idx < n_traj
+            smvs_df.loc[valid, "x"] = traj_x[row_idx[valid]]
+            smvs_df.loc[valid, "y"] = traj_y[row_idx[valid]]
+            smvs_df.loc[valid, "z"] = traj_z[row_idx[valid]]
+            # overflow: nearest by timestamp
+            overflow = ~valid
+            if overflow.any():
+                t_vals = smvs_df.loc[overflow, "timestamp"].values
+                time_idx = np.argmin(np.abs(traj_time[np.newaxis, :] - t_vals[:, np.newaxis]), axis=1)
+                smvs_df.loc[overflow, "x"] = traj_x[time_idx]
+                smvs_df.loc[overflow, "y"] = traj_y[time_idx]
+                smvs_df.loc[overflow, "z"] = traj_z[time_idx]
+            print(f"[INFO] Filled SMVS x/y/z from {ref_traj_path}", file=sys.stderr)
+
+        # Vul: no timestamp. For in-range indices use ref_traj directly,
+        # for overflow fall back to nearest-by-time using SMVS timestamps.
+        if "x" not in vul_df.columns or vul_df["x"].isna().any():
+            row_idx = vul_df["_row_index"].values.astype(int)
+            valid = row_idx < n_traj
+            vul_df.loc[valid, "x"] = traj_x[row_idx[valid]]
+            vul_df.loc[valid, "y"] = traj_y[row_idx[valid]]
+            vul_df.loc[valid, "z"] = traj_z[row_idx[valid]]
+            overflow = ~valid
+            if overflow.any():
+                # Get corresponding SMVS timestamps (rows are aligned)
+                smvs_t = smvs_df["timestamp"].values
+                smvs_x_arr = smvs_df["x"].values
+                smvs_y_arr = smvs_df["y"].values
+                smvs_z_arr = smvs_df["z"].values
+                # vul row i matches smvs row i, so use smvs xyz (already filled)
+                vul_idx = vul_df.loc[overflow].index
+                vul_df.loc[overflow, "x"] = smvs_x_arr[vul_idx]
+                vul_df.loc[overflow, "y"] = smvs_y_arr[vul_idx]
+                vul_df.loc[overflow, "z"] = smvs_z_arr[vul_idx]
+            print(f"[INFO] Filled vul x/y/z from {ref_traj_path}", file=sys.stderr)
+
+    for col in ["x", "y", "z"]:
+        smvs_df[col] = pd.to_numeric(smvs_df[col], errors="coerce")
+        vul_df[col] = pd.to_numeric(vul_df[col], errors="coerce")
 
     smvs_df = smvs_df.dropna(subset=["timestamp", "x", "y", "z", "smvs"])
     vul_df = vul_df.dropna(subset=["x", "y", "z", "vec_x", "vec_y", "smvs"])
@@ -178,13 +241,21 @@ def select_high_smvs_frames(
     if top_k < 2:
         raise SystemExit("--top-k must be >= 2 because intersections require at least two rays.")
 
-    candidates = smvs_df[smvs_df["smvs"] > threshold].copy()
-    if len(candidates) == 0:
-        print(f"[WARN] No frames with smvs > {threshold}; falling back to all frames.", file=sys.stderr)
-        candidates = smvs_df.copy()
-
-    # Sort by SMVS descending and take top-k
-    candidates = candidates.nlargest(min(top_k, len(candidates)), "smvs").reset_index(drop=True)
+    # Sort by SMVS (direction depends on SMVS convention):
+    #   - Positive SMVS (higher=better): use nlargest
+    #   - Negative SMVS (lower=better, as in jackal dataset): use nsmallest
+    if smvs_df["smvs"].max() > 0:
+        candidates = smvs_df[smvs_df["smvs"] > threshold].copy()
+        if len(candidates) == 0:
+            print(f"[WARN] No frames with smvs > {threshold}; falling back to all frames.", file=sys.stderr)
+            candidates = smvs_df.copy()
+        candidates = candidates.nlargest(min(top_k, len(candidates)), "smvs").reset_index(drop=True)
+    else:
+        candidates = smvs_df[smvs_df["smvs"] < threshold].copy()
+        if len(candidates) == 0:
+            print(f"[WARN] No frames with smvs < {threshold}; falling back to all frames.", file=sys.stderr)
+            candidates = smvs_df.copy()
+        candidates = candidates.nsmallest(min(top_k, len(candidates)), "smvs").reset_index(drop=True)
 
     # Apply time window filter if specified
     if time_window is not None and time_window > 0 and len(candidates) > 0:
@@ -261,6 +332,12 @@ def build_rays(
     rays: List[Ray] = []
 
     for _, row in high_df.iterrows():
+        # Skip frames with zero position (outside ref_traj range, fill fell back to origin)
+        if abs(float(row["x"])) < EPS and abs(float(row["y"])) < EPS:
+            if verbose:
+                print(f"[WARN] skip frame row={int(row['_row_index'])}: zero position (x=y=0).", file=sys.stderr)
+            continue
+
         matched, matched_distance = match_vulnerability_row(row, smvs_df, vul_df, match_mode)
 
         # Vulnerable direction vector: from robot (x,y) pointing toward critical object.
@@ -330,9 +407,6 @@ def intersect_rays(r1: Ray, r2: Ray) -> Optional[Tuple[float, float, float, floa
 
     t1 = (px * r2.dy - py * r2.dx) / det
     t2 = (px * r1.dy - py * r1.dx) / det
-
-    if t1 < 0.0 or t2 < 0.0:
-        return None
 
     ix = r1.x + t1 * r1.dx
     iy = r1.y + t1 * r1.dy
@@ -441,19 +515,15 @@ def trajectory_line(m: float, n: float) -> Line:
 
 def perpendicular_line_paper(m: float, cx: float, cy: float) -> Line:
     """
-    Printed Eq.(7):
-      g(x) = -1/m*x + (-m*Cx + Cy)
-
-    General form:
-      y = q*x + b
-      q*x - y + b = 0
+    Perpendicular to y=mx+n that passes through C=(cx,cy).
+    Slope: -1/m, intercept: derived from C.
     """
     if abs(m) < EPS:
         # y = n is horizontal, perpendicular should be x = Cx.
         return Line(a=1.0, b=0.0, c=-cx)
 
     q = -1.0 / m
-    b = -m * cx + cy
+    b = cy + cx / m
     return Line(a=q, b=-1.0, c=b)
 
 
@@ -697,7 +767,7 @@ def build_config_output(result: Dict[str, object], args: argparse.Namespace) -> 
 def main() -> None:
     args = parse_args()
 
-    smvs_df, vul_df = load_csvs(args.smvs, args.vul)
+    smvs_df, vul_df = load_csvs(args.smvs, args.vul, args.ref_traj)
 
     result = select_spoofer(
         smvs_df=smvs_df,
