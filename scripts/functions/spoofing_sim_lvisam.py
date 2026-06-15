@@ -222,7 +222,8 @@ def _synth_wall_records_original(n: int,
                                  intensity_value: float = 120.0,
                                  num_lines: int = 16,
                                  point_step: int = 22,
-                                 lidar_scan_period: float = 0.1) -> np.ndarray:
+                                 lidar_scan_period: float = 0.1,
+                                 intensities: np.ndarray = None) -> np.ndarray:
     if n <= 0:
         return np.zeros((0, point_step), dtype=np.uint8)
 
@@ -243,7 +244,11 @@ def _synth_wall_records_original(n: int,
     # Using sin would compress the elevation: arctan(sin(elev)) ≠ elev.
     z = r * np.tan(elev_rad)
 
-    intensity = np.full(n, intensity_value, dtype=np.float32)
+    # Sample from real intensity distribution; fall back to intensity_value if unavailable
+    if intensities is not None and intensities.shape[0] > 0:
+        intensity = intensities.astype(np.float32)
+    else:
+        intensity = np.full(n, intensity_value, dtype=np.float32)
     ring = _approx_ring_from_z_and_r(z, r, num_lines=num_lines)
 
     if point_step == 18:
@@ -256,8 +261,9 @@ def _synth_wall_records_original(n: int,
 
 def _beam_project_wall_records(source_records: np.ndarray,
                                wall_distance: float,
-                               intensity_value = None,
-                               point_step: int = 22) -> np.ndarray:
+                               intensity_value=None,
+                               point_step: int = 22,
+                               intensities: np.ndarray = None) -> np.ndarray:
     if source_records.shape[0] == 0:
         return np.zeros((0, point_step), dtype=np.uint8)
 
@@ -273,10 +279,17 @@ def _beam_project_wall_records(source_records: np.ndarray,
     z = z0 / norm_safe * wall_distance
     r = wall_distance  # all injected points are at wall_distance
 
-    if intensity_value is None:
-        intensity = _read_float32(source_records, 12, 16)
+    # Priority: passed-in intensities > source_records intensities > intensity_value fallback
+    if intensities is not None and intensities.shape[0] == source_records.shape[0]:
+        intensity = intensities.astype(np.float32)
     else:
-        intensity = np.full(source_records.shape[0], intensity_value, dtype=np.float32)
+        orig_int = _read_float32(source_records, 12, 16)
+        if orig_int.max() > 0:
+            intensity = orig_int
+        elif intensity_value is not None:
+            intensity = np.full(source_records.shape[0], intensity_value, dtype=np.float32)
+        else:
+            intensity = np.full(source_records.shape[0], 120.0, dtype=np.float32)
 
     if point_step == 18:
         tag = _approx_tag_from_z_and_r(z, r)
@@ -314,6 +327,7 @@ def _square_wall_records(
     num_lines: int = 16,
     point_step: int = 22,
     lidar_scan_period: float = 0.1,
+    intensities: np.ndarray = None,
 ) -> np.ndarray:
     if n <= 0:
         return np.zeros((0, point_step), dtype=np.uint8)
@@ -342,7 +356,11 @@ def _square_wall_records(
     # Use tan(elev) to preserve physical elevation angle (Pitch = arctan(z/r)).
     z = r * np.tan(elev_rad)
 
-    intensity = np.full(n, intensity_value, dtype=np.float32)
+    # Sample from real intensity distribution; fall back to wall_intensity if unavailable
+    if intensities is not None and intensities.shape[0] > 0:
+        intensity = intensities.astype(np.float32)
+    else:
+        intensity = np.full(n, intensity_value, dtype=np.float32)
     ring = _approx_ring_from_z_and_r(z, r, num_lines=num_lines)
 
     if point_step == 18:
@@ -361,6 +379,7 @@ def _square_beam_project_records(
     rotate_rad: float,
     intensity_value: float = 120.0,
     point_step: int = 22,
+    intensities: np.ndarray = None,
 ) -> np.ndarray:
     if source_records.shape[0] == 0:
         return np.zeros((0, point_step), dtype=np.uint8)
@@ -387,10 +406,15 @@ def _square_beam_project_records(
     z = z0 / norm_safe * d_fake
     r = d_fake
 
-    if intensity_value is None:
-        intensity = _read_float32(source_records, 12, 16)
+    # Priority: passed-in intensities > source_records intensities > wall_intensity fallback
+    if intensities is not None and intensities.shape[0] == source_records.shape[0]:
+        intensity = intensities.astype(np.float32)
     else:
-        intensity = np.full(source_records.shape[0], intensity_value, dtype=np.float32)
+        orig_int = _read_float32(source_records, 12, 16)
+        if orig_int.max() > 0:
+            intensity = orig_int
+        else:
+            intensity = np.full(source_records.shape[0], intensity_value, dtype=np.float32)
 
     if point_step == 18:
         tag = _approx_tag_from_z_and_r(z, r)
@@ -548,6 +572,19 @@ def static_injection(
     if n_wall <= 0:
         return kept
 
+    # Sample intensity from sector's original intensity distribution
+    # to avoid mismatch (e.g. Kitti uses 0-1 normalized, not raw 0-255).
+    # Falls back to wall_intensity if sector has no points or all-zero intensities.
+    if affected.shape[0] > 0:
+        orig_intensities = _read_float32(affected, 12, 16)
+        if orig_intensities.max() > 0:
+            # Sample from the real intensity distribution of sector points
+            sector_intensities = rng.choice(orig_intensities, size=n_wall, replace=True)
+        else:
+            sector_intensities = None  # all-zero intensities -> use fallback
+    else:
+        sector_intensities = None
+
     # ── D-SLAMSpoof square / corner / planar geometry ───────────────────
     square_models = {"square", "corner", "planar"}
     if static_geometry_model in square_models:
@@ -583,6 +620,7 @@ def static_injection(
                 rotate_rad,
                 intensity_value=wall_intensity,
                 point_step=point_step,
+                intensities=None,  # inherit from selected source records
             )
         else:
             wall_records = _square_wall_records(
@@ -596,6 +634,7 @@ def static_injection(
                 num_lines=int(vertical_lines),
                 point_step=point_step,
                 lidar_scan_period=lidar_scan_period,
+                intensities=sector_intensities,
             )
 
         if kept.shape[0] == 0:
@@ -617,6 +656,7 @@ def static_injection(
                 wall_distance,
                 intensity_value=wall_intensity,
                 point_step=point_step,
+                intensities=None,  # inherit from selected source records
             )
     else:
         wall_records = _synth_wall_records_original(
@@ -629,6 +669,7 @@ def static_injection(
             num_lines=int(vertical_lines),
             point_step=point_step,
             lidar_scan_period=lidar_scan_period,
+            intensities=sector_intensities,
         )
 
     if kept.shape[0] == 0:

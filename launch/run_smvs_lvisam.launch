@@ -1,6 +1,6 @@
 <launch>
-    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/smvs/"/>
-    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/vul/"/>
+    <arg name="smvs_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/smvs/"/>
+    <arg name="vulnerablity_save_dir" default="/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_jackal/vul/"/>
 
     <param name="smvs_save_dir" value="$(arg smvs_save_dir)"/>
     <param name="vulnerablity_save_dir" value="$(arg vulnerablity_save_dir)"/>

@@ -220,7 +220,11 @@ def attack_angle_lidar_local(robot_x: float, robot_y: float,
     expressed relative to the LiDAR's forward direction.
     """
     world_angle = attack_angle_world(robot_x, robot_y, spoofer_x, spoofer_y)
-    local_angle = world_angle - robot_yaw
+    # slamspoof yaw convention: yaw=0 → +Y_world (KITTI forward/North)
+    # polar_mask_2d convention: atan2(y,x), 0° → +X (East)
+    # → yaw convention is 90° ahead of the atan2 convention
+    #   so we add pi/2 to align them before passing to polar_mask_2d
+    local_angle = world_angle - robot_yaw + np.pi / 2.0
     return np.arctan2(np.sin(local_angle), np.cos(local_angle))
 
 
@@ -405,7 +409,7 @@ def main():
                         horizontal_resolution=horizontal_resolution,
                         vertical_lines=vertical_lines,
                         spoofing_rate=spoofing_rate,
-                        point_step=lidar_topic_length,
+                        point_step=point_step,
                         lidar_scan_period=lidar_scan_period,
                     )
 
@@ -423,7 +427,7 @@ def main():
                         wall_intensity=wall_intensity,
                         square_scale_S=square_scale_S,
                         square_rotate_rad=square_rotate_rad,
-                        point_step=lidar_topic_length,
+                        point_step=point_step,
                         lidar_scan_period=lidar_scan_period,
                     )
 
@@ -447,7 +451,7 @@ def main():
                         M_corr=M_corr,
                         lidar_scan_period=lidar_scan_period,
                         auto_cycle=auto_cycle,
-                        point_step=lidar_topic_length,
+                        point_step=point_step,
                     )
 
                 elif spoofing_mode == "adaptive":
@@ -475,7 +479,7 @@ def main():
                         square_scale_S=square_scale_S,
                         lidar_scan_period=lidar_scan_period,
                         auto_cycle=auto_cycle,
-                        point_step=lidar_topic_length,
+                        point_step=point_step,
                     )
 
                 # Statistics

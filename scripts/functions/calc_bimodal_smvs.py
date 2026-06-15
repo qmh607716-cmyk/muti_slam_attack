@@ -68,10 +68,13 @@ _W_SPATIAL  = 0.15   # feature spatial distribution
 _W_PARALLAX = 0.15   # parallax information
 
 # Maximum visual compensation coefficient
-_GAMMA = 0.40
+# Increased to 0.70: higher V-Vul → stronger Bi-Vul suppression,
+# forcing selection into truly common-vulnerability zones where vision also fails.
+_GAMMA = 0.70
 
-# V-Vul floor (prevents complete neglect of weak visual)
-_VUL_FLOOR = 0.02
+# V-Vul floor: removed. Zero visual compensation means maximum Bi-Vul penalty,
+# which correctly selects areas where both LiDAR AND vision are vulnerable.
+_VUL_FLOOR = 0.0
 
 # Temporal EMA smoothing coefficient (0=no smoothing, 1=heavy smoothing)
 _EMA_ALPHA = 0.60
@@ -386,21 +389,25 @@ def fuse_bimodal(l_vul, v_vul, l_vul_max: float = None) -> np.ndarray:
     """
     Fuse L-Vul and V-Vul.
 
-    L-Vul-aware fusion:
-        Bi-Vul[k] = L-Vul[k] × (1 - V-Vul[k] × L-Vul_norm[k])
+    L-Vul-aware fusion with doubled visual penalty:
+        Bi-Vul[k] = L-Vul[k] × (1 - 2.0 × V-Vul[k] × L-Vul_norm[k])
     where L-Vul_norm[k] = L-Vul[k] / l_vul_max.
 
-    Meaning: in areas with low L-Vul, V-Vul's compensation value is also reduced.
+    Doubled penalty (2×) strongly suppresses areas where vision compensates,
+    forcing selection into truly common-vulnerability zones.
+
+    Clamped to non-negative: Bi-Vul >= 0.
 
     If l_vul_max is None, degrades to:
-        Bi-Vul[k] = L-Vul[k] × (1 - V-Vul[k])
+        Bi-Vul[k] = L-Vul[k] × (1 - 2.0 × V-Vul[k])
     """
     if l_vul_max is None or l_vul_max <= 0:
-        return l_vul * (1.0 - v_vul)
+        bi_vul = l_vul * (1.0 - 2.0 * v_vul)
+        return np.maximum(bi_vul, 0.0)
 
     l_vul_norm = l_vul / l_vul_max
-    bi_vul = l_vul * (1.0 - v_vul * l_vul_norm)
-    return bi_vul
+    bi_vul = l_vul * (1.0 - 2.0 * v_vul * l_vul_norm)
+    return np.maximum(bi_vul, 0.0)
 
 
 # ---------------------------------------------------------------------------
