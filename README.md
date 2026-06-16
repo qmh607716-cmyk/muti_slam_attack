@@ -1,33 +1,7 @@
-# Muti-sensor SLAM Attack
+# LV-SLAM Attack
 
 ## 概述
-
-将 SLAMSpoof (ICRA 2025) LiDAR 欺骗攻击框架移植到 **LVI-SAM**（LiDAR-视觉-惯性紧耦合）。
-
-原版 SLAMSpoof 攻击 A-LOAM / KISS-ICP 等纯 LiDAR SLAM，共两种模式：
-- **`removal`**：HFR 噪声攻击，删除攻击窗口内点并注入随机噪声
-- **`static`**：圆柱形假墙注入，在固定距离上均匀注入伪造点
-
-本工作在此基础上扩展到 LVI-SAM：
-
-| | 原版 SLAMSpoof | 本工作 |
-|---|---|---|
-| 目标 SLAM | A-LOAM / KISS-ICP（纯 LiDAR） | LVI-SAM（LiDAR-视觉） |
-| 保留 Topic | LiDAR + IMU | LiDAR、Camera、IMU、GPS|
-| 点云格式 | xyz-only | 完整 22 字节 Velodyne 布局 |
-| SMVS | 仅 LiDAR（G-ICP Hessian 特征值） | LiDAR + 视觉双模态融合（Bi-Vul） |
-| 假墙几何 | 均匀随机圆柱墙 | 新增：束投影 / 菱形集中 / L 形墙角 |
-| 动态攻击 | 无 | 动墙注入 + 由 $M_{corr}$ 推导最优振荡周期 |
-
-> `square` / `corner` / 动态振荡由 D-SLAMSpoof 论文提出；双模态 SMVS（Bi-Vul）为本工作的扩展。
-
----
-
-## 攻击模式
-
-### 1. `removal` — HFR 噪声攻击
-删除攻击窗口内真实点，注入随机噪声点。模拟硬件干扰或信号阻塞。
-
+SLAMSpoof (ICRA 2025) LiDAR 欺骗攻击框架移植到 **LVI-SAM**类LiDAR-视觉-惯性耦合SLAM系统
 ### 2. `static` — 假墙注入
 
 **原版**：圆柱形均匀假墙（`original_random`），在 `wall_dist` 距离上均匀注入伪造点，几何约束分散。
@@ -40,7 +14,6 @@
 | `beam_project` | 本工作 | 沿原 scan line 方向投影到固定距离，继承 ring/time |
 | `square` | D-SLAMSpoof | 菱形集中几何（极坐标方程），约束集中在边缘方向 |
 | `corner` | D-SLAMSpoof | L 形墙角（square + rotate=0），两侧边缘面向 LiDAR |
-
 
 
 ### 3. `dynamic` — 动墙注入
@@ -240,35 +213,13 @@ python3 ~/catkin_ws/src/slamspoof/scripts/compare_lvisam_traj_csv.py \
 | `M_corr` | SLAM 最大对应距离 | 1.0 m（LVI-SAM） |
 | `auto_cycle` | 自动推导最优振荡周期 | `true` |
 
----
 
-## 项目结构
-
-```
-slamspoof/
-├── scripts/
-│   ├── BimodalSpoofingSimulation.py      # 双模态 SMVS 节点
-│   ├── spoofing_editer_lvisam.py          # Rosbag 攻击编辑器
-│   ├── select_spoofer_from_bimodal.py      # Spoofer 位置选择
-│   ├── compare_lvisam_traj_csv.py         # 轨迹对比
-│   └── functions/
-│       ├── spoofing_sim_lvisam.py          # 攻击函数（6种模式）
-│       └── calc_bimodal_smvs.py            # 双模态 SMVS 计算
-├── launch/
-│   ├── run_bimodal_smvs_lvisam.launch      # 双模态 SMVS（含节点启动）
-│   └── rosbag_editer_lvisam.launch         # Rosbag 编辑器
-├── config_lvisam.json                      # Jackal 配置
-└── config_lvisam_handheld.json            # Handheld 配置
-```
-
----
 
 ## 实验结果
 
 
-
-## 8 组 d=30 spoof_range=180 攻击评估
-### 4 个 Spoofer 坐标
+##  distance_threshold=30 spoofing_range=180 
+###Spoofer 坐标
 
 | Platform × Method | spoofer_x | spoofer_y |
 |---|---|---|
@@ -277,7 +228,7 @@ slamspoof/
 | **handheld + smvs**   | `193.907815` | `-12.706408` |
 | **handheld + bismvs** | `47.85`      | `-77.70`     |
 
-### 8 组攻击指标总表
+### 攻击评估（evo)
 
 | Group | raw APE | aligned 2D | RPE-max | RPE-10m | 平移量 | 旋转角 | zone_s | zone RMSE | onset 1m | drift |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
