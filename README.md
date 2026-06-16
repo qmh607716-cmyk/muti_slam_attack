@@ -314,12 +314,111 @@ slamspoof/
 
 ---
 
+## v3 验证：8 组 30180 攻击评估（已核实的攻击指标）
+
+> 本节是基于 `LVI-SAM/datasets/eval_results_v3/` 下 8 个子目录（`jackal_smvs_static` / `jackal_smvs_removal` / `jackal_bismvs_static` / `jackal_bismvs_removal` / `handheld_smvs_static` / `handheld_smvs_removal` / `handheld_bismvs_static` / `handheld_bismvs_removal`）的最终核实结果。
+> 每个子目录使用 30180 后缀的 attack csv（`attack_{static,removal}/{smvs,bismvs}_30180/*_traj.csv`）作为攻击轨迹输入，对照 original csv 跑 `evaluate_attack.py`，再用 evo 算 APE / RPE。
+> `attack_metrics`（zone 触发带数据）已根据用户确认的 4 个 spoofer 坐标 + `distance_threshold=30 m` **重算**。
+
+### 4 个 Spoofer 坐标（已确认）
+
+| Platform × Method | `spoofer_x` | `spoofer_y` | 共用于 |
+|---|---:|---:|---|
+| **jackal + bismvs**   | `152.55`     | `226.58`     | static + removal |
+| **jackal + smvs**     | `32.277679`  | `10.812261`  | static + removal |
+| **handheld + smvs**   | `193.907815` | `-12.706408` | static + removal |
+| **handheld + bismvs** | `47.85`      | `-77.70`     | static + removal |
+
+### 8 组攻击指标总表（APE / RPE / sim3 / 触发带 / success）
+
+| Group | `spoofer (x,y)` | raw APE (m) | aligned 2D (m) | RPE-max (m) | RPE-10m (m) | sim3 \|t\| (m) | sim3 rot° | zone_s (s) | zone RMSE (m) | onset 1m (s) | drift (m/s) | OK? |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
+| jackal_smvs_static    | (32.28, 10.81)   |   6.13 |   6.02 |   17.00 | 1.28 |  3.20 | 17.08 | **295.10** |   8.56 |    71.41 |  -0.00 | ✅ |
+| jackal_smvs_removal   | (32.28, 10.81)   |   0.35 |   0.29 |    7.71 | 0.57 |  0.07 |  0.10 |  295.10 |   0.04 |  1366.86 |   0.00 | ❌ |
+| jackal_bismvs_static  | (152.55, 226.58) |  55.26 |  53.67 |  115.64 | 8.89 | 13.80 |  2.61 |   65.76 |   0.56 |  1366.45 |  -0.00 | ✅ |
+| jackal_bismvs_removal | (152.55, 226.58) |   0.52 |   0.34 |    7.71 | 0.56 |  0.24 |  0.08 |   65.76 |   0.34 |  1366.86 |   0.00 | ❌ |
+| handheld_smvs_static  | (193.91, -12.71) |   1.10 |   1.06 |    5.25 | 0.24 |  0.33 |  0.19 |    0.00 |     – |   341.92 |     – | ❌ |
+| handheld_smvs_removal | (193.91, -12.71) |   1.51 |   1.47 |    3.92 | 0.27 |  0.32 |  0.41 |    0.00 |     – |   134.95 |     – | ❌ |
+| handheld_bismvs_static  | (47.85, -77.70) |  95.18 |  81.22 |   28.61 | 2.56 | 17.08 | 35.80 |   47.60 | **34.12** |   124.26 | **1.15** | ✅ |
+| handheld_bismvs_removal | (47.85, -77.70) |   3.97 |   3.82 |   19.46 | 2.23 |  0.74 |  1.43 |   47.60 |   1.81 |   245.90 |   0.05 | ❌ |
+
+**列含义**（单一真源：`summary_metrics_table.csv`）：
+
+- `raw APE`：SLAMSpoof 论文头号指标，evo Sim3 对齐后 3D RMSE（**不依赖 spoofer**）
+- `aligned 2D`：Umeyama SE(2)+scale 对齐后 2D RMSE（从 csv 重算，**不依赖 spoofer**）
+- `RPE-max` / `RPE-10m`：evo RPE，max 值和 10 m 基线 RMSE（**不依赖 spoofer**）
+- `sim3 |t|` / `sim3 rot°`：evo 内部 Sim3 对齐的平移范数和旋转角（**不依赖 spoofer**）
+- `zone_s`：机器人在 spoofer 30 m 范围内累计时长（**依赖 spoofer**）
+- `zone RMSE`：触发带内 2D RMSE（**依赖 spoofer**）
+- `onset 1m`：2D 偏差首次超 1 m 的时间（**依赖 spoofer**）
+- `drift`：触发带内漂移速度 m/s（**依赖 spoofer**）
+- `OK?`：attack success（APE ≥ 4.2 m）
+
+### 总图：8 组 XY 对齐 + 8 组偏差
+
+> 两张图都是用 30180 归档目录下的 attack csv 跑的；子图标题里的 `spoofer (x,y)` 位置和红色 30 m 触发圈是按上表 4 个坐标重画的。`raw APE` 与 `aligned 2D` 两套数字与上表完全一致。
+
+| 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（对齐后） |
+|---|---|
+| ![xy](docs/results/summary_xy_grid.png) | ![dev](docs/results/summary_deviation_grid.png) |
+
+### 8 组子图（每组：XY 轨迹 + 偏差曲线）
+
+| Group | XY 轨迹（带 spoofer 圈 / r=30m） | 偏差曲线（带触发带阴影） |
+|---|---|---|
+| jackal_smvs_static    | ![](docs/results/jackal_smvs_static/xy_compare_aligned.png)     | ![](docs/results/jackal_smvs_static/deviation_aligned.png) |
+| jackal_smvs_removal   | ![](docs/results/jackal_smvs_removal/xy_compare_aligned.png)    | ![](docs/results/jackal_smvs_removal/deviation_aligned.png) |
+| jackal_bismvs_static  | ![](docs/results/jackal_bismvs_static/xy_compare_aligned.png)   | ![](docs/results/jackal_bismvs_static/deviation_aligned.png) |
+| jackal_bismvs_removal | ![](docs/results/jackal_bismvs_removal/xy_compare_aligned.png)  | ![](docs/results/jackal_bismvs_removal/deviation_aligned.png) |
+| handheld_smvs_static  | ![](docs/results/handheld_smvs_static/xy_compare_aligned.png)   | ![](docs/results/handheld_smvs_static/deviation_aligned.png) |
+| handheld_smvs_removal | ![](docs/results/handheld_smvs_removal/xy_compare_aligned.png)  | ![](docs/results/handheld_smvs_removal/deviation_aligned.png) |
+| handheld_bismvs_static  | ![](docs/results/handheld_bismvs_static/xy_compare_aligned.png)  | ![](docs/results/handheld_bismvs_static/deviation_aligned.png) |
+| handheld_bismvs_removal | ![](docs/results/handheld_bismvs_removal/xy_compare_aligned.png) | ![](docs/results/handheld_bismvs_removal/deviation_aligned.png) |
+
+### v3 验证主要发现
+
+1. **3/8 组达到 attack success（APE ≥ 4.2 m）**：
+   - `jackal_smvs_static`（APE = 6.13 m，spoofer 离起点仅 35 m，几乎全程 295 s 在触发带内）
+   - `jackal_bismvs_static`（APE = 55.26 m，仅 65 s 触发但单次爆点 213 m）
+   - `handheld_bismvs_static`（APE = 95.18 m，47 s 触发但单次爆点 156 m，drift 1.15 m/s）
+
+2. **SMVS 与 BiSMVS 是两种完全不同的攻击风格**：
+   - **SMVS = 慢性毒药**：spoofer 离路径很近（jackal 32 m / handheld 194 m），机器一进带就**持续小偏移累积**（jackal_smvs_static 在带内 295 s 累积出 16.6 m 峰值）。**整张图偏差持续在**。
+   - **BiSMVS = 狙击**：spoofer 离路径远（jackal 152 m / handheld 47 m），进带**时间短（47-66 s）但单次峰值巨大（156-213 m）**，SLAM 直接崩溃/回环重置。
+
+3. **APE 数字与 spoofer 位置无关**：APE / RPE 来自 evo 输出，**从来没受 spoofer_xy 写错影响**。修正前的 8 组 spoofer 坐标错误只影响 `attack_metrics`（zone 触发带分析），已按用户确认的 4 个坐标重算。
+
+4. **`handheld_smvs_{static,removal}` 两条 `success=False` 的本质是 attack 根本没触发**：
+   - 路径从不经过 spoofer (193.9, -12.7) 的 30 m 圈，`zone_s = 0`
+   - 1.10 m / 1.51 m APE 完全来自 SLAM 自身漂移，不是 attack 效果
+
+5. **8/8 组中 `removal` 模式全部 `success=False`**：
+   - `removal` 只删点不注入假点，攻击强度远低于 `static`
+   - 4 组 removal 的 APE 都在 0.35-3.97 m 之间，**未达 4.2 m success 阈值**
+   - 这与 SLAMSpoof 论文中 `removal` 在 LiDAR-only SLAM 上效果较弱的结论一致
+
+### 数据来源
+
+- **CSV 提取脚本**：`slamspoof/scripts/extract_lvisam_odom_csv.py`
+- **攻击评估脚本**：`slamspoof/scripts/evaluate_attack.py`
+- **评估目录**：`LVI-SAM/datasets/eval_results_v3/<group>/{metrics_complete.json, evo_ape.txt, xy_compare_aligned.png, deviation_aligned.png}`
+- **数据复算脚本**（用于核实 spoofer 修正后的 attack_metrics）：
+  - `LVI-SAM/datasets/eval_results_v3/fix_spoofers.py` — 写入 4 个权威 spoofer
+  - `LVI-SAM/datasets/eval_results_v3/recompute_aligned_from_csv.py` — 重算 aligned 2D RMSE
+  - `LVI-SAM/datasets/eval_results_v3/recompute_attack_metrics.py` — 重算 zone / onset / drift
+  - `LVI-SAM/datasets/eval_results_v3/final_table.py` — 打印本节总表
+  - `LVI-SAM/datasets/eval_results_v3/summarize_with_dual_numbers.py` — 画本节两张总图
+  - `LVI-SAM/datasets/eval_results_v3/redraw_with_correct_spoofer.py` — 重画子图（含红圈 / 红带）
+
+---
+
 ### 主要发现
 
 1. **Bi-SMVS 引导的 removal 攻击**在 handheld / garden / jackal 三个场景均有效，最大偏差 2.7~7.7 m，且不导致系统发散。
 2. **新版 static 攻击在大型场景（garden / jackal）失效**——最大偏差达 30~200 m，系统严重发散。原因是新版 spoofer 位置由 Bi-SMVS 引导，视觉补偿会抑制 static 假墙注入的视觉一致性，从而改变 spoofer 位置。
 3. **D-SLAMSpoof dynamic (corner) 动墙注入**在 garden 场景从 31.6 m 降至 0.45 m，在 jackal 保持 0.50 m，动墙振荡使攻击在大型场景下重新生效。
 4. **D-SLAMSpoof static (beam_project)** 在 garden / jackal 均有效，beam_project 继承原 beam 的 ring/time 拓扑，欺骗性更强。
+5. **v3 验证（8 组 30180 评估）** 揭示了 SMVS 与 BiSMVS 在攻击"风格"上的本质差异——见上节"v3 验证"中的第 2 条发现。
 
 ---
 
