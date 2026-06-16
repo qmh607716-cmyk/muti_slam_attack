@@ -2,6 +2,11 @@
 
 ## 概述
 SLAMSpoof (ICRA 2025) LiDAR 欺骗攻击框架移植到 **LVI-SAM**类LiDAR-视觉-惯性耦合SLAM系统
+
+
+### 1. `removal` — HFR 噪声攻击
+删除攻击窗口内真实点，注入随机噪声点。模拟硬件干扰或信号阻塞。
+
 ### 2. `static` — 假墙注入
 
 **原版**：圆柱形均匀假墙（`original_random`），在 `wall_dist` 距离上均匀注入伪造点，几何约束分散。
@@ -27,7 +32,7 @@ t_cycle = (d_max - d_min) / M_corr × Δt
 
 ## 快速开始
 
-### 硬件需求
+### 需求
 - ROS Noetic + Catkin Tools
 - LVI-SAM（`~/catkin_ws/devel_catkin_tools`）
 - `small_gicp`（G-ICP 后端）
@@ -141,9 +146,9 @@ python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_from_bimodal.py \
 生成攻击 bag：
 
 ```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel_catkin_tools/setup.bash
-roslaunch slamspoof_icra rosbag_editer_lvisam.launch config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam_handheld.json
+        source /opt/ros/noetic/setup.bash
+	source ~/catkin_ws/devel_catkin_tools/setup.bash
+	roslaunch slamspoof_icra rosbag_editer_lvisam.launch config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam.json
 ```
 
 ---
@@ -183,17 +188,13 @@ python3 ~/catkin_ws/src/slamspoof/scripts/extract_lvisam_odom_csv.py \
 ### 阶段 6：轨迹对比
 
 ```bash
-mkdir -p ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/compare
 
-python3 ~/catkin_ws/src/slamspoof/scripts/compare_lvisam_traj_csv.py \
-    --orig ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv \
-    --att  ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_static/handheld_attack_static_traj.csv \
-    --out-prefix ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/compare/handheld_static_compare \
-    --title "Handheld: Original vs static Attack" \
-    --spoofer-x <spoofer_x> \
-    --spoofer-y <spoofer_y> \
-    --wall-dist 15.0 \
-    --spoofing-range 80.0
+python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
+	    --orig ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv \
+	    --att ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_static/smvs/handheld_attack_static_traj.csv \
+	    --out-dir ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/eval \
+	    --title "handheld: static attack" \
+	    --spoofer-x xxx --spoofer-y xxx --distance-threshold xx
 ```
 
 ---
