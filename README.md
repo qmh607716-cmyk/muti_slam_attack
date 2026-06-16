@@ -220,7 +220,7 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 
 
 ##  distance_threshold=30 spoofing_range=180 
-###Spoofer 坐标
+### Spoofer 坐标
 
 | Platform × Method | spoofer_x | spoofer_y |
 |---|---|---|
@@ -242,18 +242,9 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 | handheld_bismvs_static  | 95.18 |  81.22 |   28.61 | 2.56 | 17.08 m | 35.80° |   47.60 | **34.12** |   124.26 | **1.15** |
 | handheld_bismvs_removal |  3.97 |   3.82 |   19.46 | 2.23 |  0.74 m |  1.43° |   47.60 |   1.81 |   245.90 |   0.05 |
 
-**列含义**：
 
-- `raw APE`：SLAMSpoof 论文头号指标，evo Sim3 对齐后 3D RMSE
-- `aligned 2D`：Umeyama SE(2)+scale 对齐后 2D RMSE
-- `RPE-max` / `RPE-10m`：evo RPE，max 值和 10 m 基线 RMSE
-- `sim3 |t|` / `sim3 rot°`：evo 内部 Sim3 对齐的平移范数和旋转角
-- `zone_s`：机器人在 spoofer 30 m 范围内累计时长
-- `zone RMSE`：触发带内 2D RMSE
-- `onset 1m`：2D 偏差首次超 1 m 的时间
-- `drift`：触发带内漂移速度 m/s
 
-### 总图：8 组 XY 对齐后的结果 + 8 组偏差
+### 8 组 XY 对齐后的结果 + 8 组偏差
 
 | 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（对齐后） |
 |---|---|
@@ -264,34 +255,25 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 ---
 
 ##  distance_threshold=15 spoofing_range=80  (v4 tight threshold)
-把触发半径减半 + 角度收窄到 80°，看 attack 是否仍能奏效。
+把触发半径减半 + 角度收窄到 80°，看 attack 是否仍能奏效。表格列与 v3 完全一致。
 
-### 攻击评估（evo, paper-aligned: APE-RMSE 4.2m 阈值）
+### 攻击评估（evo)
 
-| Group | APE-RMSE | APE-rot | RPE-max | RPE-1m | RPE-10m | Success (≥4.2m) | zone_s | drift |
-|---|---:|---:|---:|---:|---:|---|---:|---:|
-| jackal_smvs_static    | 0.35 | 10.92 |  7.63 | 0.24 | 0.24 | ✗ | 55.27 | 0.000010 |
-| jackal_smvs_removal   | 0.31 |  0.15 |  7.68 | 0.21 | 0.63 | ✗ | 55.27 | -0.000002 |
-| jackal_bismvs_static  | 0.39 | 10.85 | 19.19 | 0.23 | 1.36 | ✗ | 17.95 | 0.009590 |
-| jackal_bismvs_removal | 0.35 | 10.83 | 20.41 | 0.23 | 1.42 | ✗ | 17.95 | 0.003875 |
-| handheld_smvs_static   | 2.11 | 1.05 | 5.25 | 0.18 | 0.43 | ✗ | **0 (N/A)** | – |
-| handheld_smvs_removal  | 1.90 | 1.00 | 5.26 | 0.18 | 0.37 | ✗ | **0 (N/A)** | – |
-| handheld_bismvs_static | 2.00 | 1.06 | 3.89 | 0.13 | 0.32 | ✗ | **0 (N/A)** | – |
-| handheld_bismvs_removal| 2.32 | 1.20 | 3.75 | 0.14 | 0.37 | ✗ | **0 (N/A)** | – |
+| Group | raw APE | aligned 2D | RPE-max | RPE-10m | 平移量 | 旋转角 | zone_s | zone RMSE | onset 1m | drift |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| jackal_smvs_static    |  0.35 |   0.29 |   7.63 |  0.24 |  0.50 m |  0.18° |  55.27 |   0.07 |  1366.45 |  0.00001 |
+| jackal_smvs_removal   |  0.31 |   0.29 |   7.68 |  0.63 |  0.09 m |  0.05° |  55.27 |   0.03 |  1366.86 | -0.00000 |
+| jackal_bismvs_static  |  0.39 |   0.32 |  19.19 |  1.36 |  0.61 m |  0.25° |  17.95 |   0.26 |  1366.45 |  0.00959 |
+| jackal_bismvs_removal |  0.35 |   0.26 |  20.41 |  1.42 |  0.55 m |  0.25° |  17.95 |   0.18 |  1366.45 |  0.00387 |
+| handheld_smvs_static  |  2.11 |   2.42 |   5.25 |  0.43 |  1.09 m |  0.34° |       0 |     – |        – |        – |
+| handheld_smvs_removal |  1.90 |   1.99 |   5.26 |  0.37 |  0.38 m |  0.43° |       0 |     – |        – |        – |
+| handheld_bismvs_static  |  2.00 |   2.09 |   3.89 |  0.32 |  0.31 m |  0.42° |       0 |     – |        – |        – |
+| handheld_bismvs_removal |  2.32 |   2.40 |   3.75 |  0.37 |  0.40 m |  0.38° |       0 |     – |        – |        – |
 
-**列含义**：
-- `APE-RMSE` / `APE-rot`：evo Umeyama SE(3) 对齐后 RMSE（**SLAMSpoof 论文头号指标**）
-- `RPE-max` / `RPE-1m` / `RPE-10m`：evo RPE，max 值 / 1 m 步长 RMSE / 10 m 步长 RMSE
-- `Success`：`APE-RMSE >= 4.2m` 即视为 attack 成功（论文阈值）
-- `zone_s`：触发带内累计时长；**handheld 4 组 zone=0**——spoofer 离轨迹 21.9~93.6 m，dt=15 m 时彻底不触发
-- `drift`：触发带内漂移速度 m/s（zone=0 时为 –）
+### 总图：8 组 XY 对齐后的结果 + 8 组偏差（v4）
 
-### 总图：8 组柱状 + 散点 + XY + 偏差（v4）
-
-| APE-RMSE + max(RPE) 双柱 | APE-RMSE vs RPE-max 散点 |
+| 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（raw） |
 |---|---|
-| ![bar](docs/results/v4/summary_bar.png) | ![scatter](docs/results/v4/summary_scatter.png) |
-| **8 组 XY 轨迹（Umeyama 对齐后）** | **8 组逐帧 2D 偏差（raw）** |
 | ![xy](docs/results/v4/summary_xy_grid.png) | ![dev](docs/results/v4/summary_deviation_grid.png) |
 
 **v4 小结**：**0/8 attack success**。把触发半径从 30 m 缩到 15 m + 角度从 180° 收到 80° 后：
