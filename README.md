@@ -308,27 +308,7 @@ slamspoof/
 | ![xy](docs/results/summary_xy_grid.png) | ![dev](docs/results/summary_deviation_grid.png) |
 
 
-### v3 验证主要发现
 
-1. **3/8 组达到 attack success（APE ≥ 4.2 m）**：
-   - `jackal_smvs_static`（APE = 6.13 m，spoofer 离起点仅 35 m，几乎全程 295 s 在触发带内）
-   - `jackal_bismvs_static`（APE = 55.26 m，仅 65 s 触发但单次爆点 213 m）
-   - `handheld_bismvs_static`（APE = 95.18 m，47 s 触发但单次爆点 156 m，drift 1.15 m/s）
-
-2. **SMVS 与 BiSMVS 是两种完全不同的攻击风格**：
-   - **SMVS = 慢性毒药**：spoofer 离路径很近（jackal 32 m / handheld 194 m），机器一进带就**持续小偏移累积**（jackal_smvs_static 在带内 295 s 累积出 16.6 m 峰值）。**整张图偏差持续在**。
-   - **BiSMVS = 狙击**：spoofer 离路径远（jackal 152 m / handheld 47 m），进带**时间短（47-66 s）但单次峰值巨大（156-213 m）**，SLAM 直接崩溃/回环重置。
-
-3. **APE 数字与 spoofer 位置无关**：APE / RPE 来自 evo 输出，**从来没受 spoofer_xy 写错影响**。修正前的 8 组 spoofer 坐标错误只影响 `attack_metrics`（zone 触发带分析），已按用户确认的 4 个坐标重算。
-
-4. **`handheld_smvs_{static,removal}` 两条 `success=False` 的本质是 attack 根本没触发**：
-   - 路径从不经过 spoofer (193.9, -12.7) 的 30 m 圈，`zone_s = 0`
-   - 1.10 m / 1.51 m APE 完全来自 SLAM 自身漂移，不是 attack 效果
-
-5. **8/8 组中 `removal` 模式全部 `success=False`**：
-   - `removal` 只删点不注入假点，攻击强度远低于 `static`
-   - 4 组 removal 的 APE 都在 0.35-3.97 m 之间，**未达 4.2 m success 阈值**
-   - 这与 SLAMSpoof 论文中 `removal` 在 LiDAR-only SLAM 上效果较弱的结论一致
 
 
 
