@@ -1,12 +1,12 @@
 {
   "main": {
     "input_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/handheld.bag",
-    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_removal/smvs/handheld_attack_removal.bag",
+    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_removal/bismvs/handheld_attack_removal.bag",
     "reference_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv",
     "spoofing_mode": "removal",
-    "spoofer_x": 193.907815,
-    "spoofer_y":  -12.706408,
-    "distance_threshold": 15.0,
+    "spoofer_x": 47.85, 
+    "spoofer_y": -77.70,
+    "distance_threshold": 30.0,
     "lidar_topic": "/points_raw",
     "lidar_topic_length": 22,
     "imu_topic": "/imu_correct",

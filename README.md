@@ -250,11 +250,9 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 |---|---|
 | ![xy](docs/results/summary_xy_grid.png) | ![dev](docs/results/summary_deviation_grid.png) |
 
-**v3 小结**：3/8 attack success（`jackal_smvs_static`, `jackal_bismvs_static`, `handheld_bismvs_static`）。attack 能否奏效取决于：(1) spoofer 距轨迹 ≤ 30 m，(2) 机器人在 zone 内停留足够长。
-
 ---
 
-##  distance_threshold=15 spoofing_range=80  (v4 tight threshold)
+##  distance_threshold=15 spoofing_range=80 
 把触发半径减半 + 角度收窄到 80°，看 attack 是否仍能奏效。表格列与 v3 完全一致。
 
 ### 攻击评估（evo)
@@ -270,18 +268,11 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 | handheld_bismvs_static  |  2.00 |   2.09 |   3.89 |  0.32 |  0.31 m |  0.42° |       0 |     – |        – |        – |
 | handheld_bismvs_removal |  2.32 |   2.40 |   3.75 |  0.37 |  0.40 m |  0.38° |       0 |     – |        – |        – |
 
-### 总图：8 组 XY 对齐后的结果 + 8 组偏差（v4）
+### 8 组 XY 对齐后的结果 + 8 组偏差（v4）
 
 | 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（raw） |
 |---|---|
 | ![xy](docs/results/v4/summary_xy_grid.png) | ![dev](docs/results/v4/summary_deviation_grid.png) |
-
-**v4 小结**：**0/8 attack success**。把触发半径从 30 m 缩到 15 m + 角度从 180° 收到 80° 后：
-
-- 4 个 jackal 组：zone 从 295 s/66 s 缩到 55 s/18 s，**累积漂移时间不够**，APE 全部 < 0.4 m
-- 4 个 handheld 组：spoofer 离轨迹最近 21.9 m（bismvs），最远 93.6 m（smvs），**dt=15 m 时 zone=0 全部不触发**，APE 1.9~2.3 m 完全来自 LVI-SAM 手持模式自身的 baseline drift（>0.5 m 持续 80%+，>1 m 持续 60%+）
-
-→ **dt=15 / sr=80 对所有攻击都致命**：触发半径减半 = 攻击窗口减半，角度减半 = 单次累积偏差减半。
 
 ---
 
