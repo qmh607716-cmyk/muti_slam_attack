@@ -252,8 +252,7 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 
 ---
 
-##  distance_threshold=15 spoofing_range=80  (v4 tight threshold)
-把触发半径减半 + 角度收窄到 80°，看 attack 是否仍能奏效。表格列与 v3 完全一致。
+##  distance_threshold=15 spoofing_range=80 
 
 ### 攻击评估（evo)
 
@@ -268,18 +267,13 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 | handheld_bismvs_static  |  2.00 |   2.09 |   3.89 |  0.32 |  0.44 m |  0.23° |       0 |     – |        – |        – |
 | handheld_bismvs_removal |  2.32 |   2.40 |   3.75 |  0.37 |  0.55 m |  0.19° |       0 |     – |        – |        – |
 
-### 总图：8 组 XY 对齐后的结果 + 8 组偏差（v4）
+8 组 XY 对齐后的结果 + 8 组偏差
 
 | 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（raw） |
 |---|---|
 | ![xy](docs/results/v4/summary_xy_grid.png) | ![dev](docs/results/v4/summary_deviation_grid.png) |
 
-**v4 小结**：**0/8 attack success**。把触发半径从 30 m 缩到 15 m + 角度从 180° 收到 80° 后：
 
-- 4 个 jackal 组：zone 从 295 s/66 s 缩到 55 s/18 s，**累积漂移时间不够**，APE 全部 < 0.4 m，Sim3 平移量 < 0.07 m / 旋转角 < 0.07°
-- 4 个 handheld 组：spoofer 离轨迹最近 21.9 m（bismvs），最远 93.6 m（smvs），**dt=15 m 时 zone=0 全部不触发**，APE 1.9~2.3 m 完全来自 LVI-SAM 手持模式自身的 baseline drift（>0.5 m 持续 80%+，>1 m 持续 60%+），Sim3 平移量 0.42~0.65 m / 旋转角 0.19~0.34°（这是 baseline 而非 attack）
-
-→ **dt=15 / sr=80 对所有攻击都致命**：触发半径减半 = 攻击窗口减半，角度减半 = 单次累积偏差减半。
 
 ---
 
@@ -299,28 +293,12 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 | handheld_bismvs_static  | **87.45** | **125.73** |  21.55 |  1.89 | **16.16 m** | **36.01°** |   47.60 | **34.82** |   133.14 | **1.20151** |
 | handheld_bismvs_removal |  0.78 |   0.99 |   5.19 |  0.28 |  0.18 m |  0.25° |   47.60 |   0.67 |   263.25 |  0.00669 |
 
-### 总图：8 组 XY 对齐后的结果 + 8 组偏差（v5）
+### 8 组 XY 对齐后的结果 + 8 组偏差
 
 | 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（raw） |
 |---|---|
 | ![xy](docs/results/v5/summary_xy_grid.png) | ![dev](docs/results/v5/summary_deviation_grid.png) |
 
-**v5 小结**：**1/8 attack success**（`handheld_bismvs_static`）。把 sr 从 180° 收到 80° 但保持 dt=30 m 后：
-
-- 4 个 jackal 组（v3 全部成功 / 4）：**全部失效**。v3 jackal_smvs_static 平移量 3.20 m / 旋转角 17.08° 是因为 spoofer 离 jackal 路径 < 30 m 且 spoofer 在 180° 角度下能持续影响 4 个关键 scan line；收窄到 80° 后只能影响 1~2 个 scan line，SLAM G-ICP 容易回退到正确的 scan
-- 4 个 handheld 组（v3 2/4 成功）：**只 handheld_bismvs_static 仍成功**（APE 87.45 m，攻击造成 16.16 m 平移 + 36.01° 偏航）。handheld_bismvs 离 handheld 路径仅 21.9 m（最近的一个），触发时长 47.6 s，给了足够累积偏差时间。**handheld_smvs_static 仍 zone=0**（spoofer 离 193.91 m），即便 dt=30 m 也因手持模式的轨迹快速远离 spoofer 而无法维持触发
-
-→ **sr=80° + dt=30 m 关键发现**：
-1. jackal 路径离 spoofer 较近（< 32 m），原本靠 180° 广覆盖补偿 80° 收窄后的精度损失；**收窄后这种"靠角度补距离"的设计失败**
-2. handheld_bismvs 离路径最近（21.9 m）→ 仅这一个组仍能维持攻击
-3. 三套实验对比（v3 / v4 / v5）形成 trade-off 矩阵：
-   - **v3** (dt=30, sr=180)：3/8 success，sr 大是必要条件
-   - **v4** (dt=15, sr=80)：0/8 success，dt 小且 sr 小双重失败
-   - **v5** (dt=30, sr=80)：1/8 success，仅 handheld_bismvs (最近) 撑住
-   
-   → **dr/dt × sr 几何上等价于攻击的"角度-距离覆盖面积"**：
-   `coverage = (sr / 180°) × (dt / 30m)`。
-   v3 = 1.00 (满覆盖), v5 = 0.44 (handheld_bismvs 勉强够), v4 = 0.22 (全部失败)
 
 ---
 
