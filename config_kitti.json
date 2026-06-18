@@ -1,11 +1,11 @@
 {
   "main": {
     "input_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/kitti.bag",
-    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/attack_static/bimodal/kitti_static_bimodal.bag",
+    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/attack_static/bismvs/kitti_static.bag",
     "reference_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/original/kitti_original_traj.csv",
-    "spoofing_mode": "removal",
-    "spoofer_x":-245.019314,
-    "spoofer_y": 249.897165,
+    "spoofing_mode": "static",
+    "spoofer_x":44.73, 
+    "spoofer_y":-27.32,
     "distance_threshold": 30,
     "lidar_topic": "/points_raw",
     "lidar_topic_length": 32,

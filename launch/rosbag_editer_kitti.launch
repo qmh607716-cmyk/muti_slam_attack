@@ -12,4 +12,6 @@
     <arg name="config_file_path"
          default="$(find slamspoof_icra)/config_lvisam_kitti.json"/>
     <param name="config_file" value="$(arg config_file_path)"/>
+     <!-- Launch the Rosbag attack editor node -->
+    <node name="rosbag_editer_lvisam" pkg="slamspoof_icra" type="spoofing_editer_lvisam.py" output="screen" cwd="node"/>
 </launch>
