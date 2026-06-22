@@ -29,7 +29,7 @@
   "simulator": {
     "horizontal_resolution": 0.1,
     "vertical_lines": 16.0,
-    "spoofing_rate": 0.5,
+    "spoofing_rate": 0.8,
     "minimum_distance": 0.0,
     "maximum_distance": 30.0
   },

@@ -205,9 +205,9 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 |---|---|---|
 | `spoofing_mode` | 攻击模式 | `removal` / `static` / `dynamic` |
 | `spoofer_x/y` | Spoofer 世界坐标 | 从阶段 3 获取 |
-| `distance_threshold` | 触发半径 | 5 ~ 15 m |
-| `spoofing_range` | 攻击窗口总角度 | 80° ~ 160° |
-| `wall_dist` | 假墙固定距离（static） | 10 ~ 20 m |
+| `distance_threshold` | 触发半径 | 15 ~30m |
+| `spoofing_range` | 攻击窗口总角度 | 80° |
+| `wall_dist` | 假墙固定距离（static） | 15 m |
 | `wall_distance_min/max` | 动墙距离范围（dynamic） | 5 ~ 25 m |
 | `static_geometry_model` | 假墙几何 | `original_random` / `beam_project` / `square` / `corner` |
 | `square_rotate_rad` | 菱形旋转角 | 0（corner）/ π/4（平面） |
@@ -216,87 +216,83 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 
 
 
-## 实验结果
+## 实验结果（统一 evo APE 评估）
 
-### Spoofer 坐标
+### 评估口径
 
-| Platform × Method | spoofer_x | spoofer_y |
-|---|---|---|
-| **jackal + bismvs**   | `152.55`     | `226.58`     |
-| **jackal + smvs**     | `32.277679`  | `10.812261`  |
-| **handheld + smvs**   | `193.907815` | `-12.706408` |
-| **handheld + bismvs** | `47.85`      | `-77.70`     |
+- **A**：APE translation RMSE（m），evo Umeyama SE(3)+scale 对齐
+- **B**：APE rotation RMSE（deg）
+- **C**：max RPE translation（m），1m/10m delta 中的最大值
+- **D**：raw 2D 偏差最大值（m，未对齐，反映真实攻击距离）
+- 成功阈值：**APE ≥ 4.2 m**（SLAMSpoof 论文 §I 标准，"超出一条车道"）
 
-##  distance_threshold=30 spoofing_range=180 
+所有 cell 的 CSV 路径：`~/catkin_ws/src/LVI-SAM/datasets/slamspoof_<platform>/attack_<mode>/<smvs>_<cfg>/`。
 
-### 攻击评估（evo)
+### Spoofer 坐标（选点结果）
 
-| Group | raw APE | aligned 2D | RPE-max | RPE-10m | 平移量 | 旋转角 | zone_s | zone RMSE | onset 1m | drift |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| jackal_smvs_static    |  6.13 |   6.02 |   17.00 | 1.28 |  3.20 m | 17.08° | **295.10** |   8.56 |    71.41 |  -0.00 |
-| jackal_smvs_removal   |  0.35 |   0.29 |    7.71 | 0.57 |  0.07 m |  0.10° |  295.10 |   0.04 |  1366.86 |   0.00 |
-| jackal_bismvs_static  | 55.26 |  53.67 |  115.64 | 8.89 | 13.80 m |  2.61° |   65.76 |   0.56 |  1366.45 |  -0.00 |
-| jackal_bismvs_removal |  0.52 |   0.34 |    7.71 | 0.56 |  0.24 m |  0.08° |   65.76 |   0.34 |  1366.86 |   0.00 |
-| handheld_smvs_static  |  1.10 |   1.06 |    5.25 | 0.24 |  0.33 m |  0.19° |    0.00 |     – |   341.92 |     – |
-| handheld_smvs_removal |  1.51 |   1.47 |    3.92 | 0.27 |  0.32 m |  0.41° |    0.00 |     – |   134.95 |     – |
-| handheld_bismvs_static  | 95.18 |  81.22 |   28.61 | 2.56 | 17.08 m | 35.80° |   47.60 | **34.12** |   124.26 | **1.15** |
-| handheld_bismvs_removal |  3.97 |   3.82 |   19.46 | 2.23 |  0.74 m |  1.43° |   47.60 |   1.81 |   245.90 |   0.05 |
+| Platform × SMVS | spoofer_x | spoofer_y | 选点算法 |
+|---|---|---|---|
+| handheld + smvs | 193.91 | −12.71 | `select_spoofer_from_smvs_paper.py`（论文 §III-C 半线交点） |
+| handheld + bismvs | 47.85 | −77.70 | `select_spoofer_bi_bo.py`（CMA-ES + 累积漂移） |
+| jackal + smvs | 32.28 | 10.81 | `select_spoofer_from_smvs_paper.py` |
+| jackal + bismvs | 152.55 | 226.58 | `select_spoofer_bi_bo.py` |
 
+注入几何：所有 cell 均为 `static_geometry_model=square`（D-SLAMSpoof 菱形），`wall_dist=15 m`。
+Attack direction：固定指向 spoofer（`atan2(spoofer − robot)`，LiDAR local frame）。
 
+### distance_threshold=30, spoofing_range=180
 
-### 8 组 XY 对齐后的结果 + 8 组偏差
+| Group | A: APE-trans-RMSE (m) | B: APE-rot-RMSE (deg) | C: max RPE-trans (m) | D: raw 2D max (m) | 成功? |
+|---|---:|---:|---:|---:|---|
+| handheld_smvs_static    |  **1.10** |   0.62 |   5.25 |   4.06 | ❌ |
+| handheld_smvs_removal   |  **1.51** |   0.82 |   3.92 |   3.46 | ❌ |
+| handheld_bismvs_static  | **95.18** |  36.81 |  28.61 | **318.39** | ✅✅ |
+| handheld_bismvs_removal |  **3.97** |  12.96 |  19.46 |  13.77 | ❌ |
+| jackal_smvs_static      |  **6.13** |   8.41 |  17.00 | **114.35** | ✅ |
+| jackal_smvs_removal     |  **0.35** |   0.26 |   7.71 |   7.70 | ❌ |
+| jackal_bismvs_static    | **55.26** |  39.00 | **115.64** | **231.32** | ✅✅ |
+| jackal_bismvs_removal   |  **0.52** |   0.27 |   7.71 |   7.75 | ❌ |
 
-| 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（对齐后） |
-|---|---|
-| ![xy](docs/results/summary_xy_grid.png) | ![dev](docs/results/summary_deviation_grid.png) |
+### distance_threshold=30, spoofing_range=80
 
----
+| Group | A: APE-trans-RMSE (m) | B: APE-rot-RMSE (deg) | C: max RPE-trans (m) | D: raw 2D max (m) | 成功? |
+|---|---:|---:|---:|---:|---|
+| handheld_smvs_static    |  **1.48** |   0.84 |   3.88 |   3.46 | ❌ |
+| handheld_smvs_removal   |  **1.46** |   0.73 |   5.21 |   3.80 | ❌ |
+| handheld_bismvs_static  | **77.20** |  30.95 |  19.52 | **263.25** | ✅✅ |
+| handheld_bismvs_removal |  **0.78** |  11.89 |   5.19 |   5.04 | ❌ |
+| jackal_smvs_static      |  **0.30** |   0.18 |   7.72 |   7.72 | ❌ |
+| jackal_smvs_removal     |  **0.33** |  10.88 |   7.73 |   7.89 | ❌ |
+| jackal_bismvs_static    |  **0.44** |   0.29 |   7.69 |   7.76 | ❌ |
+| jackal_bismvs_removal   |  **0.35** |  10.88 |  20.40 |   7.91 | ❌ |
 
-##  distance_threshold=15 spoofing_range=80 
+### distance_threshold=15, spoofing_range=80
 
-### 攻击评估（evo)
+| Group | A: APE-trans-RMSE (m) | B: APE-rot-RMSE (deg) | C: max RPE-trans (m) | D: raw 2D max (m) | 成功? |
+|---|---:|---:|---:|---:|---|
+| handheld_smvs_static    |  **2.11** |   1.05 |   5.25 |   7.31 | ❌ |
+| handheld_smvs_removal   |  **1.90** |   1.00 |   5.26 |   4.75 | ❌ |
+| handheld_bismvs_static  |  **2.00** |   1.06 |   3.89 |   5.13 | ❌ |
+| handheld_bismvs_removal |  **2.32** |   1.20 |   3.75 |   6.26 | ❌ |
+| jackal_smvs_static      |  **0.35** |  10.92 |   7.63 |   7.79 | ❌ |
+| jackal_smvs_removal     |  **0.31** |   0.15 |   7.68 |   7.79 | ❌ |
+| jackal_bismvs_static    |  **0.39** |  10.85 |  19.19 |   7.81 | ❌ |
+| jackal_bismvs_removal   |  **0.35** |  10.83 |  20.41 |   7.84 | ❌ |
 
-| Group | raw APE | aligned 2D | RPE-max | RPE-10m | 平移量 | 旋转角 | zone_s | zone RMSE | onset 1m | drift |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| jackal_smvs_static    |  0.35 |   0.29 |   7.63 |  0.24 |  0.05 m |  0.07° |  55.27 |   0.07 |  1366.45 |  0.00001 |
-| jackal_smvs_removal   |  0.31 |   0.29 |   7.68 |  0.63 |  0.07 m |  0.03° |  55.27 |   0.03 |  1366.86 | -0.00000 |
-| jackal_bismvs_static  |  0.39 |   0.32 |  19.19 |  1.36 |  0.05 m |  0.07° |  17.95 |   0.26 |  1366.45 |  0.00959 |
-| jackal_bismvs_removal |  0.35 |   0.26 |  20.41 |  1.42 |  0.06 m |  0.04° |  17.95 |   0.18 |  1366.45 |  0.00387 |
-| handheld_smvs_static  |  2.11 |   2.42 |   5.25 |  0.43 |  0.65 m |  0.34° |       0 |     – |        – |        – |
-| handheld_smvs_removal |  1.90 |   1.99 |   5.26 |  0.37 |  0.42 m |  0.24° |       0 |     – |        – |        – |
-| handheld_bismvs_static  |  2.00 |   2.09 |   3.89 |  0.32 |  0.44 m |  0.23° |       0 |     – |        – |        – |
-| handheld_bismvs_removal |  2.32 |   2.40 |   3.75 |  0.37 |  0.55 m |  0.19° |       0 |     – |        – |        – |
+### 关键观察
 
-8 组 XY 对齐后的结果 + 8 组偏差
+1. **`distance_threshold=30, spoofing_range=180` 是唯一强有效的配置**。Bi-SMVS static 在 handheld (95 m) / jackal (55 m) 都远超 4.2 m 阈值。
+2. **Bi-SMVS static >> SMVS static**：在 dt=30/sr=180 下，Bi-SMVS 把 handheld 攻击从 1.10 m 提升到 95.18 m（**86×**），jackal 从 6.13 m 提升到 55.26 m（**9×**）。
+3. **`removal` 模式对 LVI-SAM 几乎无效**：所有 removal cell 的 APE < 4.2 m，**最大也才 3.97 m**（handheld_bismvs_removal）。原因：LVI-SAM 的 VINS 视觉跟踪能恢复 HFR 删除的点。
+4. **`dt=15` 太短**：spoofer 几乎接触不到 trajectory，攻击窗口太短，没有一次达到阈值。
+5. **`dt=30, sr=80` 比 `dt=30, sr=180` 弱很多**：80° 攻击窗不够覆盖完整的 Bi-Vul 高发方向，效果退化（handheld_bismvs_static 77.20 vs 95.18，jackal_bismvs_static 0.44 vs 55.26）。
+6. **raw 2D max（攻击瞬间最大偏离）能到 318 m**，但 Umeyama 对齐后 APE 只有 95 m —— 说明攻击会让车短暂偏离 ~300 m 再被 SLAM 拉回。
 
-| 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（raw） |
-|---|---|
-| ![xy](docs/results/v4/summary_xy_grid.png) | ![dev](docs/results/v4/summary_deviation_grid.png) |
+### 8 组完整结果网格（dt=30, sr=180 选 8 个）
 
-
----
-
-##  distance_threshold=30 spoofing_range=80 
-
-
-### 攻击评估（evo)
-
-| Group | raw APE | aligned 2D | RPE-max | RPE-10m | 平移量 | 旋转角 | zone_s | zone RMSE | onset 1m | drift |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| jackal_smvs_static    |  0.30 |   0.54 |   7.72 |  0.58 |  0.09 m |  0.14° |  295.10 |   0.09 |  2100.51 | -0.00000 |
-| jackal_smvs_removal   |  0.33 |   0.44 |   7.73 |  0.24 |  0.12 m |  0.12° |  295.10 |   0.05 |  1366.45 | -0.00000 |
-| jackal_bismvs_static  |  0.44 |   0.30 |   7.69 |  0.60 |  0.23 m |  0.02° |   65.76 |   0.37 |  1366.86 |  0.00020 |
-| jackal_bismvs_removal |  0.35 |   0.38 |  20.40 |  1.67 |  0.17 m |  0.11° |   65.76 |   0.55 |  1366.45 | -0.00005 |
-| handheld_smvs_static  |  1.48 |   1.64 |   3.88 |  0.28 |  0.28 m |  0.31° |       0 |     – |        – |        – |
-| handheld_smvs_removal |  1.46 |   1.65 |   5.21 |  0.20 |  0.32 m |  0.33° |       0 |     – |        – |        – |
-| handheld_bismvs_static  | **87.45** | **125.73** |  21.55 |  1.89 | **16.16 m** | **36.01°** |   47.60 | **34.82** |   133.14 | **1.20151** |
-| handheld_bismvs_removal |  0.78 |   0.99 |   5.19 |  0.28 |  0.18 m |  0.25° |   47.60 |   0.67 |   263.25 |  0.00669 |
-
-### 8 组 XY 对齐后的结果 + 8 组偏差
-
-| 8 组 XY 轨迹（Umeyama 对齐后） | 8 组逐帧 2D 偏差（raw） |
-|---|---|
-| ![xy](docs/results/v5/summary_xy_grid.png) | ![dev](docs/results/v5/summary_deviation_grid.png) |
+8 组 XY 轨迹（Umeyama 对齐后）        |  8 组逐帧 2D 偏差（对齐后）
+:-------------------------:|:-------------------------:
+![xy](docs/results/summary_xy_grid.png) | ![dev](docs/results/summary_deviation_grid.png)
 
 
 ---

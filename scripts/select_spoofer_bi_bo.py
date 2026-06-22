@@ -27,10 +27,6 @@ Improvements over select_spoofer_continuous_opt.py:
    After BO finds the global region, run L-BFGS-B from top-K BO candidates
    for sub-meter precision.
 
-5. LLM-AGENT META-OPTIMIZATION (optional)
-   Uses GPT-4o to analyze the optimization landscape and suggest adaptive
-   search strategies. Can be disabled via --no-agent.
-
 Usage:
     python3 select_spoofer_bi_bo.py \
         --smvs ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/smvs/bimodal/06_08_14_25_15.csv \
@@ -66,15 +62,6 @@ try:
     HAS_SKOPT = True
 except ImportError:
     HAS_SKOPT = False
-
-# ---------------------------------------------------------------------------
-# LLM Agent (OpenAI)
-# ---------------------------------------------------------------------------
-try:
-    from openai import OpenAI as OAIClient
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
 
 
 # ============================================================================
@@ -976,173 +963,7 @@ def lbfgsb_refine(
 
 
 # ============================================================================
-# Stage 6: LLM-Agent Meta-Optimization
-# ============================================================================
-
-class SpooferAgent:
-    """
-    LLM-Agent that analyzes the optimization landscape and provides
-    adaptive search strategy suggestions.
-    """
-
-    def __init__(self, model: str = "gpt-4o", api_key: str = None, base_url: str = None):
-        self.model = model
-        self.client = None
-        self.backend = "none"
-        if HAS_OPENAI:
-            try:
-                import httpx
-                if base_url is None:
-                    # Auto-detect local Ollama via raw TCP probe (bypasses HTTP proxy)
-                    try:
-                        import socket
-                        with socket.create_connection(("127.0.0.1", 11434), timeout=1) as s:
-                            s.sendall(b"GET /api/tags HTTP/1.0\r\nHost: localhost\r\n\r\n")
-                            data = s.recv(4096).decode("utf-8", errors="ignore")
-                            if "200 OK" in data and '"models"' in data:
-                                base_url = "http://127.0.0.1:11434/v1"
-                                # Always override model when using local Ollama
-                                # (GPT/Claude names are not valid for ollama).
-                                self.model = "qwen2.5:7b"
-                                self.backend = "ollama"
-                    except Exception:
-                        pass
-
-                proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-                if proxy and proxy.startswith(("socks://", "socks5://")):
-                    proxy = None
-                is_local = base_url and ("127.0.0.1" in base_url or "localhost" in base_url)
-                if is_local:
-                    # Local Ollama: never go through HTTP proxy (causes 502)
-                    proxy = None
-                if proxy:
-                    http_client = httpx.Client(proxy=proxy, timeout=120.0)
-                else:
-                    # trust_env=False: ignore HTTP_PROXY env var entirely
-                    http_client = httpx.Client(timeout=120.0, trust_env=False)
-                kwargs = dict(
-                    api_key=api_key or os.environ.get("OPENAI_API_KEY", "ollama"),
-                    http_client=http_client,
-                    timeout=120.0,
-                )
-                if base_url:
-                    kwargs["base_url"] = base_url
-                self.client = OAIClient(**kwargs)
-                if self.backend == "none":
-                    self.backend = "openai"
-            except Exception as e:
-                warnings.warn(f"Failed to init OpenAI client: {e}")
-
-    def analyze_landscape(
-        self,
-        clusters: List[Dict],
-        bo_history: List[Dict],
-        best_result: Dict,
-        traj_info: Dict,
-    ) -> str:
-        """
-        Ask the LLM to analyze the optimization landscape and suggest
-        adaptive strategies.
-        """
-        if not self.client:
-            return "LLM not available (no API key or client init failed)."
-
-        cluster_summary = []
-        for i, c in enumerate(clusters[:5]):
-            dominant_angles = sorted(set(
-                round(a, 1) for _, a, _ in c['dominant_dirs'][:10]
-            ))
-            cluster_summary.append(
-                f"  Cluster {i+1}: centroid=({c['centroid'][0]:.1f}, {c['centroid'][1]:.1f}), "
-                f"total_vul={c['total_vul']:.0f}, frames={len(c['frames'])}, "
-                f"dominant_dirs={dominant_angles[:6]}"
-            )
-
-        recent_history = bo_history[-10:]
-
-        prompt = f"""You are a spoofer deployment optimization expert for LiDAR SLAM security research.
-
-## Current Optimization State
-
-### Trajectory Info
-- Length: {traj_info.get('length_m', 'N/A')}m
-- Spatial span: {traj_info.get('span_m', 'N/A')}m
-- Num trajectory points: {traj_info.get('n_pts', 'N/A')}
-
-### Top Spatial-Directional Clusters
-{chr(10).join(cluster_summary)}
-
-### Bayesian Optimization History (last 10 evaluations)
-{json.dumps(recent_history, indent=2)}
-
-### Best Result So Far
-- Position: ({best_result.get('sx', 'N/A'):.2f}, {best_result.get('sy', 'N/A'):.2f})
-- Score: {best_result.get('score', 'N/A'):.2f}
-- Min trajectory distance: {best_result.get('min_traj_dist', 'N/A'):.2f}m
-
-## Your Task
-
-Please analyze the optimization landscape and provide:
-
-1. **Landscape Structure**: Are there clear multi-peak patterns? Which regions are most promising?
-2. **Search Strategy**: Should we focus more on exploitation (refining current best) or exploration (searching new regions)?
-3. **Cluster Prioritization**: Which cluster(s) should receive more BO budget?
-4. **Deployment Recommendations**: For the best candidate position, explain WHY it is optimal in terms of the Bi-SMVS directional analysis.
-
-Respond concisely in English with actionable insights.
-"""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=600,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"LLM query failed: {e}"
-
-    def generate_deployment_report(
-        self,
-        best_positions: List[Dict],
-        clusters: List[Dict],
-    ) -> str:
-        """Generate a human-readable attack deployment report."""
-        if not self.client:
-            return "LLM not available."
-
-        prompt = f"""Generate a technical spoofer deployment report for LiDAR SLAM attack research.
-
-## Optimal Positions
-{json.dumps(best_positions[:5], indent=2)}
-
-## Cluster Analysis
-{json.dumps([{'centroid': c['centroid'], 'total_vul': c['total_vul'], 'n_frames': len(c['frames'])}
-             for c in clusters[:5]], indent=2)}
-
-Please generate a concise report with:
-1. Executive summary (optimal positions, expected attack effectiveness)
-2. Selection rationale for each position (which vulnerable frames/directions it targets)
-3. Practical deployment notes (line-of-sight, safety distance, etc.)
-4. Comparison with alternative positions
-
-Keep it technical and concise.
-"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=800,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"LLM report generation failed: {e}"
-
-
-# ============================================================================
-# Stage 7: Visualization
+# Stage 6: Visualization
 # ============================================================================
 
 def visualize(
@@ -1372,7 +1193,7 @@ def run_pipeline(args) -> Dict[str, Any]:
     print(f"  Motion: {straight_pct:.0f}% straight-cruise, "
           f"{(traj_motion < 0.5).sum()} turn/accel frames", file=sys.stderr)
 
-    # Trajectory info for agent
+    # Trajectory info (used for logging / debug)
     xs_t = traj_pts[:, 0]; ys_t = traj_pts[:, 1]
     traj_info = {
         'length_m': float(np.sum(np.hypot(np.diff(xs_t), np.diff(ys_t)))),
@@ -1485,31 +1306,6 @@ def run_pipeline(args) -> Dict[str, Any]:
         final_min_dist = bo_min_dist
         lbfgsb_results = []
 
-    # ---- Stage 6: LLM-Agent meta-optimization (optional) ----
-    agent_report = ""
-    if not args.no_agent:
-        print(f"\n[Stage 6] LLM-Agent analysis...", file=sys.stderr)
-        agent = SpooferAgent(model=args.agent_model)
-
-        best_result = {
-            'sx': final_x, 'sy': final_y,
-            'score': final_score, 'min_traj_dist': final_min_dist,
-        }
-
-        agent_report = agent.analyze_landscape(
-            clusters=clusters,
-            bo_history=bo_history,
-            best_result=best_result,
-            traj_info=traj_info,
-        )
-        print(f"  Agent analysis:\n{agent_report[:500]}", file=sys.stderr)
-
-        deployment_report = agent.generate_deployment_report(
-            best_positions=lbfgsb_results[:5] if lbfgsb_results else [best_result],
-            clusters=clusters,
-        )
-        print(f"\n  Deployment report:\n{deployment_report[:500]}", file=sys.stderr)
-
     # ---- Visualization ----
     if args.visualize:
         print(f"\n[Visualization]...", file=sys.stderr)
@@ -1563,7 +1359,6 @@ def run_pipeline(args) -> Dict[str, Any]:
             "cluster_eps": args.cluster_eps,
             "seed": args.seed,
         },
-        "llm_agent_report": agent_report,
         "trajectory_info": traj_info,
     }
 
@@ -1603,10 +1398,6 @@ def parse_args():
                         help="Spatial clustering epsilon (m). Default: 40.0")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed. Default: 42")
-    parser.add_argument("--no-agent", action="store_true",
-                        help="Disable LLM-Agent meta-optimization")
-    parser.add_argument("--agent-model", type=str, default="gpt-4o-mini",
-                        help="LLM model for agent. Default: gpt-4o-mini")
     parser.add_argument("--output", default=None,
                         help="Output JSON path")
     parser.add_argument("--visualize", action="store_true",
