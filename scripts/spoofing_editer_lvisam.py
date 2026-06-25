@@ -220,11 +220,12 @@ def attack_angle_lidar_local(robot_x: float, robot_y: float,
     expressed relative to the LiDAR's forward direction.
     """
     world_angle = attack_angle_world(robot_x, robot_y, spoofer_x, spoofer_y)
-    # slamspoof yaw convention: yaw=0 → +Y_world (KITTI forward/North)
-    # polar_mask_2d convention: atan2(y,x), 0° → +X (East)
-    # → yaw convention is 90° ahead of the atan2 convention
-    #   so we add pi/2 to align them before passing to polar_mask_2d
-    local_angle = world_angle - robot_yaw + np.pi / 2.0
+    # LVI-SAM convention (tf::Matrix3x3.getRPY, ROS REP-103):
+    #   yaw=0 → robot faces +X (East). +90° → +Y (North).
+    #   polar_mask_2d uses (atan2(y, x) + 180) % 360, which maps +X → 180°.
+    #   We just need to subtract yaw to get local-frame direction; the
+    #   caller will do the +180 wrap when comparing.
+    local_angle = world_angle - robot_yaw
     return np.arctan2(np.sin(local_angle), np.cos(local_angle))
 
 
@@ -385,8 +386,10 @@ def main():
                 center_rad = attack_angle_lidar_local(
                     robot_x, robot_y, spoofer_x, spoofer_y, robot_yaw
                 )
-                # Convert to degrees for spoofing_sim_lvisam (uses degrees internally)
-                center_deg  = np.degrees(center_rad) % 360.0
+                # Convert to degrees for spoofing_sim_lvisam.
+                # polar_mask_2d uses (atan2(y,x)+180)%360 convention, so we
+                # wrap to the same [0, 360) range to match.
+                center_deg  = (np.degrees(center_rad) + 180.0) % 360.0
 
                 x, y, z = binary_to_xyz(bin_points)
                 n_original = bin_points.shape[0]

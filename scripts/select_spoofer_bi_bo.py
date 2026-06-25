@@ -3,7 +3,7 @@
 select_spoofer_bi_bo.py
 ========================
 
-Bi-SMVS-driven Bayesian Optimization for spoofer location selection.
+Bi-SMVS-driven CMA-ES Optimization for spoofer location selection.
 
 Improvements over select_spoofer_continuous_opt.py:
 
@@ -23,14 +23,17 @@ Improvements over select_spoofer_continuous_opt.py:
    with CMA-ES evolution strategy. CMA-ES is ideal for sparse, multi-modal
    scoring landscapes where GP-based BO fails completely. ~200 evals in < 1 minute.
 
-4. L-BFGS-B LOCAL REFINEMENT
-   After BO finds the global region, run L-BFGS-B from top-K BO candidates
-   for sub-meter precision.
+4. GRAPH BETWEEENNESS WEIGHTING (attack propagation potential)
+   Frames are weighted by their betweenness centrality in the trajectory factor graph:
+     - Bi-SMVS/Bi-Vul: measures "can we spoof here?" (attack feasibility)
+     - Betweenness: measures "if spoofed, will attack spread and resist correction?"
+     - Combined score = Bi-Vul × motion × betweenness → prioritizes positions
+       where frames are both easily spoofed AND sit at graph hubs.
 
 Usage:
     python3 select_spoofer_bi_bo.py \
-        --smvs ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/smvs/bimodal/06_08_14_25_15.csv \
-        --vul  ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/vul/bimodal/vul_06_08_14_25_15.csv \
+        --smvs ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/smvs/bismvs/06_08_14_25_15.csv \
+        --vul  ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/vul/bismvs/vul_06_08_14_25_15.csv \
         --traj ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_kitti/original/kitti_original_traj.csv \
         --top-k 20 \
         --spoofing-range 80.0 \
@@ -40,9 +43,11 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import math
 import os
+import re
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -50,18 +55,88 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 from scipy.spatial.distance import cdist
 
-# ---------------------------------------------------------------------------
-# Bayesian Optimization (scikit-optimize)
-# ---------------------------------------------------------------------------
-try:
-    from skopt import gp_minimize
-    from skopt.space import Real
-    HAS_SKOPT = True
-except ImportError:
-    HAS_SKOPT = False
+# ============================================================================
+# Graph Data Cache  (populated once, reused across all CMA evaluations)
+# ============================================================================
+_graph_cache: Dict[str, Any] = {}
+
+
+def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
+    """Load all graph dumps ONCE and return compact lookup structures.
+
+    Returns a dict with:
+      - node_arr : (N, 3)  [node_id, x, y]
+      - node_nid : (N,)    node IDs
+      - factor_nids : list of sets, one per factor, containing node IDs
+      - factor_source : list of "odometry"|"loop_closure"|"prior"|"other"
+      - factor_info  : list of float (info weight = sum(1/noise_i))
+    """
+    import time
+
+    cache_key = dump_dir
+    if cache_key in _graph_cache:
+        return _graph_cache[cache_key]
+
+    t0 = time.time()
+    dump_files = sorted(
+        glob.glob(os.path.join(dump_dir, "dump_*.json")),
+        key=lambda p: int(re.search(r'dump_(\d+)\.json', p).group(1)),
+    )
+
+    # Use the LAST dump as the canonical node list (full graph)
+    if not dump_files:
+        _graph_cache[cache_key] = None
+        return None
+
+    last_path = dump_files[-1]
+    with open(last_path) as fh:
+        last_d = json.load(fh)
+
+    nodes = last_d.get("nodes", [])
+    node_nids = np.array([int(n["id"]) for n in nodes], dtype=np.int32)
+    node_arr = np.stack([node_nids.astype(float),
+                          np.array([n.get("x", 0.0) for n in nodes]),
+                          np.array([n.get("y", 0.0) for n in nodes])], axis=1)
+
+    # factor_nids[i] = set of node IDs involved in factor i
+    # factor_source[i] = source string
+    # factor_info[i]  = information weight
+    factor_nids: List[set] = []
+    factor_source: List[str] = []
+    factor_info: List[float] = []
+
+    for dp in dump_files:
+        with open(dp) as fh:
+            d = json.load(fh)
+        for fac in d.get("factors", []):
+            keys = []
+            for k in fac.get("keys", []):
+                m = re.search(r'X(\d+)', k)
+                if m:
+                    keys.append(int(m.group(1)))
+            if not keys:
+                continue
+            src = fac.get("source", "other")
+            noise = fac.get("noise", [])
+            info = sum(1.0 / max(float(s), 1e-12) for s in noise) if noise else 0.0
+            factor_nids.append(set(keys))
+            factor_source.append(src)
+            factor_info.append(info)
+
+    result = dict(
+        node_arr=node_arr,
+        node_nids=node_nids,
+        factor_nids=factor_nids,
+        factor_source=factor_source,
+        factor_info=factor_info,
+    )
+    _graph_cache[cache_key] = result
+    print(f"[GraphCache] loaded {len(dump_files)} dumps, "
+          f"{len(node_nids)} nodes, {len(factor_nids)} factors "
+          f"in {time.time()-t0:.1f}s", file=sys.stderr)
+    return result
 
 
 # ============================================================================
@@ -92,349 +167,272 @@ N_BUCKETS = int(360.0 / STEP_DEG)
 SPOOFING_HALF_RANGE = 40.0  # ±40° attack window from paper
 
 
-# ============================================================================
-# Fix 2 & 3: Motion-aware cumulative drift scoring
-# Paper §VII-B: SMVS limitations — (1) ignores cumulative drift over multiple
-# frames, (2) assumes constant velocity, ignoring turns and acceleration.
-#
-# Solution:
-#   cumulative_drift(s) = wall_dist × Σ motion_factor[t] × alignment[t]
-#     where t indexes keyframes within the spoofing zone
-#   motion_factor[t] ∈ [0.1, 1.0]: 1.0 = straight/constant-velocity,
-#                                   0.1 = sharp turn / aggressive accel
-# ============================================================================
-
-def compute_traj_motion_factors(
-    traj_x: np.ndarray,
-    traj_y: np.ndarray,
-    traj_t: np.ndarray,
-    speed_thresh: float = 1.0,      # m/s — below this = low speed
-    curv_thresh: float = 0.05,     # rad/m — above this = sharp turn
-    speed_smooth: int = 5,
-    curv_smooth: int = 5,
-) -> np.ndarray:
-    """
-    Compute per-frame motion quality factors for trajectory-guided scoring.
-
-    Returns motion_factor[t] ∈ [0.1, 1.0]:
-      1.0 = straight road, constant velocity (best for cumulative attack)
-      0.5 = moderate speed change
-      0.1 = sharp turn or aggressive accel/decel (less effective per frame)
-
-    The factors are smoothed with a moving average to avoid noise from
-    individual frame variations.
-    """
-    n = len(traj_x)
-    if n < 3:
-        return np.ones(n, dtype=np.float64)
-
-    # Speed: finite difference with padding
-    vx = np.gradient(traj_x, traj_t)
-    vy = np.gradient(traj_y, traj_t)
-    speed = np.sqrt(vx**2 + vy**2)
-
-    # Curvature: kappa = |x'*y'' - y'*x''| / (x'^2 + y'^2)^(3/2)
-    ddx = np.gradient(vx, traj_t)
-    ddy = np.gradient(vy, traj_t)
-    speed_safe = np.where(speed > 1e-3, speed, 1e-3)
-    kappa = np.abs(vx * ddy - vy * ddx) / (speed_safe**3)
-
-    # Smooth to reduce noise
-    if speed_smooth > 1:
-        kernel = np.ones(speed_smooth) / speed_smooth
-        speed = np.convolve(speed, kernel, mode='same')
-        kappa = np.convolve(kappa, np.ones(curv_smooth) / curv_smooth, mode='same')
-
-    # Normalize speed and curvature to [0, 1] ranges
-    speed_norm = np.clip(speed / (np.percentile(speed, 80) + 1e-6), 0, 1)
-    kappa_norm = np.clip(kappa / (np.percentile(kappa, 80) + 1e-6), 0, 1)
-
-    # Motion quality score: high speed + low curvature = best
-    quality = speed_norm * (1.0 - kappa_norm)  # ∈ [0, 1]
-
-    # Map quality to factor: [0.1, 1.0]
-    # Very low quality (< 0.2) → factor = 0.1 (turn/accel zones)
-    # High quality (> 0.8) → factor = 1.0 (straight cruise)
-    factor = 0.1 + 0.9 * np.sqrt(np.clip(quality, 0, 1))
-
-    return factor.astype(np.float64)
+def _gaussian_weight(dist: float, sigma: float) -> float:
+    """Gaussian decay weight for a given distance."""
+    return math.exp(-dist * dist / (2.0 * sigma * sigma))
 
 
-def cumulative_drift_score(
+def compute_reach(
     sx: float, sy: float,
     frames: List['VulFrame'],
-    traj_pts: np.ndarray,
-    traj_t: np.ndarray,
-    traj_motion: np.ndarray,
-    spoofing_range: float,
     distance_threshold: float,
-    wall_dist: float,
+) -> float:
+    """
+    Geometric reachability: how many trajectory points (represented by vulnerable
+    frames) are within the spoofer's attack range, weighted by proximity.
+
+    reach(S) = Σ_{f in frames, ||S - f|| < distance_threshold} Gaussian(dist)
+
+    This replaces the binary "in range / out of range" check with a smooth
+    decay so that spoofer positions near many frames score higher even if no
+    single frame is extremely close.
+
+    Returns value in [0, 1] (normalized by n_frames).
+    """
+    if distance_threshold <= 0:
+        return 0.0
+    sigma = float(distance_threshold) / 3.0
+    reach = 0.0
+    for f in frames:
+        dist = math.hypot(sx - f.x, sy - f.y)
+        if dist < distance_threshold:
+            reach += _gaussian_weight(dist, sigma)
+    n = len(frames)
+    if n == 0:
+        return 0.0
+    return min(reach / n, 1.0)
+
+
+def compute_bivul_gate(
+    sx: float, sy: float,
+    frames: List['VulFrame'],
+    distance_threshold: float,
+    gate_threshold: float = 0.15,
     half_angle: float = SPOOFING_HALF_RANGE,
-) -> Dict[str, Any]:
+) -> float:
     """
-    Compute cumulative drift score for spoofer at (sx, sy).
+    Bi-Vul direction gate: confirms that at least one direction from S to a
+    triggered frame is actually vulnerable (not just geometrically reachable).
 
-    cumulative_drift = wall_dist × Σ(motion_factor[t] × alignment[t])
-    for all trajectory keyframes t within spoofing zone.
+    This is the only place bi_vul participates in the new scoring formula:
+    as a binary feasibility check (gate), NOT as a fine-grained score. The
+    "how vulnerable" question is answered by isolation × dominance.
 
-    Returns dict with:
-      - cumulative_drift_m: total expected displacement (meters)
-      - triggered_keyframes: number of trajectory points in spoofing zone
-      - mean_motion_factor: average motion quality (0.1–1.0)
-      - alignment_score: average angular alignment (0–1)
+    Returns 1.0 if any triggered frame has mean(bi_vul in attack window) > threshold,
+    else 0.0 (eliminates the candidate).
     """
-    sigma = spoofing_range / 3.0
+    sigma = float(distance_threshold) / 3.0 if distance_threshold > 0 else 1.0
     n_buckets = float(N_BUCKETS)
+    best_gate = 0.0
 
-    total_weighted = 0.0
-    total_motion = 0.0
-    total_alignment = 0.0
-    triggered = 0
-
-    for i, f in enumerate(frames):
+    for f in frames:
         dx = sx - f.x
         dy = sy - f.y
         dist = math.hypot(dx, dy)
-
-        if dist > spoofing_range or dist > distance_threshold:
+        if dist > distance_threshold:
             continue
 
-        # Distance weight
-        dist_w = math.exp(-dist * dist / (2.0 * sigma * sigma))
-
-        # Angular alignment with full 72-dim Bi-Vul
         alpha = math.atan2(dy, dx)
-        alpha_deg = (math.degrees(alpha) + 360.0) % 360.0
+        alpha_deg = (math.degrees(alpha) + 180.0) % 360.0
         alpha_bucket = alpha_deg / STEP_DEG
 
-        def _circ_f(k, center):
-            d = abs(k - center)
-            return min(d, n_buckets - d)
-
-        max_angular = 0.0
+        vals = []
         for k in range(N_BUCKETS):
             vk = f.bi_vul[k]
             if vk <= 0:
                 continue
-            dtheta = _circ_f(float(k), alpha_bucket) * STEP_DEG
-            if dtheta > half_angle:
-                continue
-            angular_w = 1.0 - dtheta / half_angle
-            max_angular = max(max_angular, vk * angular_w)
+            dtheta = abs(k - alpha_bucket)
+            dtheta = min(dtheta, n_buckets - dtheta) * STEP_DEG
+            if dtheta <= half_angle:
+                vals.append(vk * (1.0 - dtheta / half_angle))
 
-        alignment = min(max_angular / 50.0, 1.0) if max_angular > 0 else 0.0  # normalize
+        if vals:
+            mean_vul = sum(vals) / len(vals)
+            normalized = min(mean_vul / 50.0, 1.0)
+            best_gate = max(best_gate, normalized)
 
-        # Find nearest trajectory point for motion factor
-        dists_to_traj = np.sqrt((traj_pts[:, 0] - f.x)**2 + (traj_pts[:, 1] - f.y)**2)
-        nearest_t_idx = int(np.argmin(dists_to_traj))
-        motion_factor = float(traj_motion[nearest_t_idx])
+    return 1.0 if best_gate >= gate_threshold else 0.0
 
-        weighted = motion_factor * alignment
-        total_weighted += weighted
-        total_motion += motion_factor
-        total_alignment += alignment
-        triggered += 1
 
-    if triggered == 0:
-        return {
-            'cumulative_drift_m': 0.0,
-            'triggered_keyframes': 0,
-            'mean_motion_factor': 0.0,
-            'mean_alignment': 0.0,
-            'score': 0.0,
-        }
+def compute_isolation(
+    sx: float, sy: float,
+    frames: List['VulFrame'],
+    traj_pts: np.ndarray,
+    graph_dump_dir: Optional[str] = None,
+    distance_threshold: float = 15.0,
+    loop_closure_radius: float = 50.0,
+    loop_time_gap: float = 5.0,
+) -> float:
+    """
+    Structural isolation: how isolated are the affected nodes in the factor graph?
 
-    # Scale: wall_dist × accumulated weighted alignment
-    mean_mf = total_motion / triggered
-    mean_al = total_alignment / triggered
-    drift = wall_dist * mean_mf * mean_al * math.sqrt(triggered)
+    High isolation -> the attacked region has few competing constraints
+    (few loop closures, visual factors, IMU factors) -> the injected bias
+    persists in the optimization.
 
-    # Normalize score to similar range as bi_vul-based score
-    score = drift * 10.0  # scale to ~100-1000 range like bi_vul scores
+    Strategy:
+      1. Find all frames within distance_threshold of S (affected frames).
+      2. Map frames to nearest factor-graph nodes (using pre-cached data).
+      3. Count competing constraint edges (non-odometry) touching each affected node.
+      4. isolation = 1 / (1 + avg_competing_edges_per_node)
+
+    Falls back to a distance-only heuristic when no dump files are available:
+      isolation = 1 - 0.5 * (n_affected / n_total)
+    """
+    affected = []
+    for f in frames:
+        dist = math.hypot(sx - f.x, sy - f.y)
+        if dist < distance_threshold:
+            affected.append((f, dist))
+
+    if not affected:
+        return 0.0
+
+    n_affected = len(affected)
+
+    gdata = _precompute_graph_data(graph_dump_dir) if graph_dump_dir else None
+    if gdata is None:
+        total_frames = len(frames)
+        if total_frames == 0:
+            return 0.0
+        frac = n_affected / total_frames
+        return float(np.clip(1.0 - 0.5 * frac, 0.0, 1.0))
+
+    node_arr = gdata["node_arr"]
+    node_nids = gdata["node_nids"]
+    factor_nids = gdata["factor_nids"]
+    factor_source = gdata["factor_source"]
+
+    affected_nid_set = set()
+    for f, _ in affected:
+        dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
+        nearest_idx = int(np.argmin(dists))
+        affected_nid_set.add(int(node_nids[nearest_idx]))
+
+    competing_counts: Dict[int, int] = {nid: 0 for nid in affected_nid_set}
+    for f_nids, f_src in zip(factor_nids, factor_source):
+        if f_src == "odometry":
+            continue
+        for nid in f_nids:
+            if nid in competing_counts:
+                competing_counts[nid] += 1
+
+    avg_competing = float(np.mean(list(competing_counts.values()))) if competing_counts else 0.0
+    isolation = 1.0 / (1.0 + avg_competing)
+    return float(np.clip(isolation, 0.0, 1.0))
+
+
+def compute_dominance(
+    sx: float, sy: float,
+    frames: List['VulFrame'],
+    traj_pts: np.ndarray,
+    graph_dump_dir: Optional[str] = None,
+    distance_threshold: float = 15.0,
+) -> float:
+    """
+    Constraint dominance: do LiDAR constraints dominate over competing
+    constraints (loop, visual, IMU) at the affected nodes?
+
+    dominance(S) = mean over affected nodes of:
+        LiDAR_info / (LiDAR_info + loop_info + visual_info + imu_info + eps)
+
+    where info = sum of 1/noise_i for each dimension (trace of information matrix).
+
+    Falls back to 0.5 (neutral) when no dump files are available.
+    """
+    affected = []
+    for f in frames:
+        dist = math.hypot(sx - f.x, sy - f.y)
+        if dist < distance_threshold:
+            affected.append(f)
+
+    if not affected:
+        return 0.0
+
+    gdata = _precompute_graph_data(graph_dump_dir) if graph_dump_dir else None
+    if gdata is None:
+        return 0.5
+
+    node_arr = gdata["node_arr"]
+    node_nids = gdata["node_nids"]
+    factor_nids = gdata["factor_nids"]
+    factor_source = gdata["factor_source"]
+    factor_info = gdata["factor_info"]
+
+    affected_nid_set = set()
+    for f in affected:
+        dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
+        nearest_idx = int(np.argmin(dists))
+        affected_nid_set.add(int(node_nids[nearest_idx]))
+
+    lidar_info: Dict[int, float] = {nid: 0.0 for nid in affected_nid_set}
+    competing_info: Dict[int, float] = {nid: 0.0 for nid in affected_nid_set}
+
+    for f_nids, f_src, f_info in zip(factor_nids, factor_source, factor_info):
+        for nid in f_nids:
+            if nid in lidar_info:
+                lidar_info[nid] += f_info
+                if f_src != "odometry":
+                    competing_info[nid] += f_info
+
+    doms = []
+    for nid in affected_nid_set:
+        l_i = lidar_info.get(nid, 0.0)
+        c_i = competing_info.get(nid, 0.0)
+        total = l_i + c_i
+        if total > 1e-12:
+            doms.append(l_i / total)
+        else:
+            doms.append(0.5)
+
+    if doms:
+        return float(np.clip(np.mean(doms), 0.0, 1.0))
+    return 0.5
+
+
+def new_score_formula(
+    sx: float, sy: float,
+    frames: List['VulFrame'],
+    traj_pts: np.ndarray,
+    distance_threshold: float,
+    graph_dump_dir: Optional[str] = None,
+    bivul_gate_threshold: float = 0.15,
+) -> Dict[str, Any]:
+    """
+    New 4-factor scoring formula for spoofer position S = (sx, sy):
+
+        score(S) = reach(S) × isolation(S) × dominance(S) × bivul_gate(S)
+
+    where:
+      - reach(S)       : geometric reachability (how many frames are in range)
+      - isolation(S)   : structural isolation of affected nodes in factor graph
+      - dominance(S)   : LiDAR constraint dominance over competing constraints
+      - bivul_gate(S)  : binary feasibility gate (1 if direction vulnerable, else 0)
+
+    Returns dict with per-component scores and the combined score.
+    """
+    reach = compute_reach(sx, sy, frames, distance_threshold)
+    bivul = compute_bivul_gate(sx, sy, frames, distance_threshold, bivul_gate_threshold)
+    isolation = compute_isolation(sx, sy, frames, traj_pts, graph_dump_dir, distance_threshold)
+    dominance = compute_dominance(sx, sy, frames, traj_pts, graph_dump_dir, distance_threshold)
+
+    combined = (
+        0.35 * reach +
+        0.25 * isolation +
+        0.25 * dominance +
+        0.15 * bivul
+    )
 
     return {
-        'cumulative_drift_m': drift,
-        'triggered_keyframes': triggered,
-        'mean_motion_factor': mean_mf,
-        'mean_alignment': mean_al,
-        'score': score,
+        'score': float(combined),
+        'reach': float(reach),
+        'isolation': float(isolation),
+        'dominance': float(dominance),
+        'bivul_gate': float(bivul),
     }
 
 
-def _circular_distance(k1: int, k2: int, n: int = N_BUCKETS) -> float:
-    """Circular distance between two bucket indices."""
-    d = abs(k1 - k2)
-    return min(d, n - d)
-
-
-def directional_score_full(
-    frame: VulFrame,
-    sx: float, sy: float,
-    spoofing_range: float,
-    attack_half_width: float = SPOOFING_HALF_RANGE,
-) -> float:
-    """
-    Compute attack effectiveness score for a candidate spoofer position
-    using the FULL 72-dim Bi-Vul vector.
-
-    For each bucket k (5° resolution):
-      - vul_k = bi_vul[k] is the vulnerability in direction k*5°
-      - The spoofer's angular position relative to frame is alpha
-      - The attack window is [alpha - attack_half_width, alpha + attack_half_width]
-      - Score contribution = vul_k * weight_k
-        where weight_k decays with distance and angular coverage
-
-    Returns: scalar score for this (frame, spoofer) pair.
-    """
-    fx, fy = frame.x, frame.y
-    dx = sx - fx
-    dy = sy - fy
-    dist = math.hypot(dx, dy)
-
-    if dist > spoofing_range:
-        return 0.0
-
-    # Gaussian distance decay: sigma = spoofing_range / 3
-    sigma = spoofing_range / 3.0
-    dist_weight = math.exp(-dist * dist / (2.0 * sigma * sigma))
-
-    # Spoofer direction in world frame (from frame toward spoofer)
-    alpha = math.atan2(dy, dx)  # radians
-    alpha_deg = (math.degrees(alpha) + 360.0) % 360.0
-    alpha_bucket = alpha_deg / STEP_DEG  # fractional bucket index
-
-    total = 0.0
-    bi_vul = frame.bi_vul
-
-    # Direction alignment factor: prefer spoofer thrust direction that aligns
-    # with robot motion. When thrust aligns with motion, drift accumulates faster.
-    # thrust_dir: from robot toward spoofer (direction of the injected "wall push")
-    thrust_dir = math.atan2(dy, dx)  # radians
-    # motion_dir: from frame velocity/odometry (direction robot is moving)
-    motion_mag = math.hypot(frame.vec_x, frame.vec_y)
-    if motion_mag > 1e-6:
-        motion_dir = math.atan2(frame.vec_y, frame.vec_x)
-        # cosine of angle between thrust and motion
-        cos_angle = math.cos(thrust_dir - motion_dir)
-        # map [-1, 1] -> [0.3, 1.0]: perpendicular thrust still has some effect
-        alignment_factor = 0.3 + 0.7 * max(0.0, cos_angle)
-    else:
-        alignment_factor = 1.0  # no motion info, neutral
-
-    for k in range(N_BUCKETS):
-        vul_k = bi_vul[k]
-        if vul_k <= 0.0:
-            continue
-
-        # Circular distance from spoofer direction to bucket k
-        dtheta = _circular_distance_float(float(k), alpha_bucket) * STEP_DEG
-
-        if dtheta > attack_half_width:
-            continue
-
-        # Linear decay within attack window (same as paper)
-        angular_weight = 1.0 - dtheta / attack_half_width
-        total += vul_k * dist_weight * angular_weight
-
-    return total * alignment_factor
-
-
-def _circular_distance_float(k: float, center: float, n: float = 72.0) -> float:
-    """Circular distance between fractional bucket index k and center."""
-    d = abs(k - center)
-    return min(d, n - d)
-
-
-def score_scalar(
-    frames: List[VulFrame],
-    sx: float, sy: float,
-    spoofing_range: float,
-    distance_threshold: float = float('inf'),
-) -> float:
-    """
-    Scalar scoring for BO objective (fast, for use inside optimizer).
-
-    Uses the full 72-dim Bi-Vul vector.
-    """
-    total = 0.0
-    for f in frames:
-        s = directional_score_full(f, sx, sy, spoofing_range)
-        # Apply distance threshold (attack trigger window)
-        dist = math.hypot(sx - f.x, sy - f.y)
-        if dist > distance_threshold:
-            s *= 0.0
-        total += s
-    return total
-
-
-# Vectorized version for fast batch evaluation
-def score_batch_vectorized(
-    frames: List[VulFrame],
-    positions: np.ndarray,   # (N, 2) array of (sx, sy)
-    spoofing_range: float,
-    distance_threshold: float = float('inf'),
-    attack_half_width: float = SPOOFING_HALF_RANGE,
-) -> np.ndarray:
-    """
-    Fully vectorized score computation for N positions.
-    Returns scores array of shape (N,).
-    """
-    N = positions.shape[0]
-    scores = np.zeros(N, dtype=np.float64)
-
-    # Pre-extract frame data
-    n_frames = len(frames)
-    fx = np.array([f.x for f in frames], dtype=np.float64)
-    fy = np.array([f.y for f in frames], dtype=np.float64)
-    bi_vul_matrix = np.array([f.bi_vul for f in frames], dtype=np.float64)  # (n_frames, 72)
-
-    # Compute distances: shape (N, n_frames)
-    dx = positions[:, 0:1] - fx[None, :]  # (N, n_frames)
-    dy = positions[:, 1:2] - fy[None, :]  # (N, n_frames)
-    dists = np.hypot(dx, dy)  # (N, n_frames)
-
-    # Distance mask
-    in_range = dists <= spoofing_range  # (N, n_frames)
-    if distance_threshold < float('inf'):
-        in_range &= dists <= distance_threshold  # (N, n_frames)
-
-    # Distance weights: Gaussian decay
-    sigma = spoofing_range / 3.0
-    dist_weights = np.exp(-dists * dists / (2.0 * sigma * sigma))  # (N, n_frames)
-    dist_weights[~in_range] = 0.0
-
-    # Spoofer direction for each (position, frame) pair: (N, n_frames)
-    alpha = np.arctan2(dy, dx)  # (N, n_frames)
-    alpha_deg = (np.degrees(alpha) + 360.0) % 360.0  # (N, n_frames)
-
-    # bucket_angles: (72,)
-    bucket_angles = np.arange(N_BUCKETS, dtype=np.float64) * STEP_DEG
-
-    for j in range(n_frames):
-        # alpha_deg_j: (N,)
-        alpha_deg_j = alpha_deg[:, j]
-        # dist_weights_j: (N,)
-        dw_j = dist_weights[:, j]
-
-        if not np.any(dw_j > 0):
-            continue
-
-        # diff: (N, 72) - (N, 1) broadcast
-        diff = np.abs(alpha_deg_j[:, None] - bucket_angles[None, :])
-        diff = np.minimum(diff, 360.0 - diff)  # circular
-        dtheta = diff * STEP_DEG  # degrees
-
-        # Angular weights: (N, 72)
-        ang_weights = np.maximum(0.0, 1.0 - dtheta / attack_half_width)
-
-        # bi_vul for frame j: (72,)
-        bv_j = bi_vul_matrix[j, :]
-
-        # Score for frame j at all N positions: (N,) = (N,72) · (72,)
-        frame_scores = np.dot(ang_weights, bv_j)  # (N,)
-        scores += dw_j * frame_scores
-
-    return scores
+# ============================================================================
 
 
 # ============================================================================
@@ -466,25 +464,6 @@ def extract_dominant_directions(
     dominant.sort(key=lambda x: -x[2])  # sort by vul value descending
     return dominant
 
-
-def cluster_adjacent_buckets(
-    buckets: List[int],
-    merge_threshold: int = 2,
-) -> List[List[int]]:
-    """Merge adjacent bucket indices into clusters."""
-    if not buckets:
-        return []
-    sorted_buckets = sorted(buckets)
-    clusters = []
-    current = [sorted_buckets[0]]
-    for b in sorted_buckets[1:]:
-        if b - current[-1] <= merge_threshold:
-            current.append(b)
-        else:
-            clusters.append(current)
-            current = [b]
-    clusters.append(current)
-    return clusters
 
 
 def spatial_directional_clustering(
@@ -666,7 +645,7 @@ def generate_candidates_from_clusters(
         for _, angle_deg, vul_val in cluster['dominant_dirs'][:5]:  # top-5 dirs
             beta = math.radians(angle_deg)
 
-            for dist in [15.0, 25.0, 40.0, spoofing_range * 0.3, spoofing_range * 0.5]:
+            for dist in [15.0, 25.0, 40.0, max_traj_dist * 0.5, max_traj_dist * 0.7]:
                 sx = cx + dist * math.cos(beta)
                 sy = cy + dist * math.sin(beta)
 
@@ -677,33 +656,6 @@ def generate_candidates_from_clusters(
                 if min_traj_dist <= min_dist <= max_traj_dist:
                     candidates.append(np.array([sx, sy]))
 
-    # --- Supplementary: uniform sampling in feasible band (roadside constraint) ---
-    # Paper: spoofer must be 5-30m from trajectory (roadside scenario)
-    # Sample positions perpendicular to trajectory at fine intervals
-    for traj_idx in range(0, len(traj_pts), max(1, len(traj_pts) // 80)):
-        px, py = traj_pts[traj_idx, 0], traj_pts[traj_idx, 1]
-
-        # Compute local tangent direction from neighboring points
-        if traj_idx > 0 and traj_idx < len(traj_pts) - 1:
-            dx_traj = traj_pts[traj_idx + 1, 0] - traj_pts[traj_idx - 1, 0]
-            dy_traj = traj_pts[traj_idx + 1, 1] - traj_pts[traj_idx - 1, 1]
-            seg_len = math.hypot(dx_traj, dy_traj)
-            if seg_len < 0.1:
-                continue
-            tx, ty = dx_traj / seg_len, dy_traj / seg_len
-        else:
-            continue
-
-        # Perpendicular (normal) direction
-        nx, ny = -ty, tx
-
-        # Sample at multiple distances along the normal
-        for d in [min_traj_dist, (min_traj_dist + max_traj_dist) * 0.5, max_traj_dist]:
-            for sign in [1.0, -1.0]:
-                sx = px + sign * d * nx
-                sy = py + sign * d * ny
-                # Quick check: should be within scene bounding box
-                candidates.append(np.array([sx, sy]))
 
     # --- Deduplicate by rounding ---
     seen = set()
@@ -733,112 +685,72 @@ def cma_optimize(
     frames: List[VulFrame],
     x_bounds: Tuple[float, float],
     y_bounds: Tuple[float, float],
-    spoofing_range: float,
     n_calls: int = 200,
     initial_points: list = None,
     random_state: int = 42,
     traj_pts: np.ndarray = None,
-    traj_t: np.ndarray = None,
-    traj_motion: np.ndarray = None,
-    wall_dist: float = 15.0,
     distance_threshold: float = 15.0,
     min_traj_dist: float = 5.0,
+    graph_dump_dir: Optional[str] = None,
 ) -> Tuple[float, float, float, List[Dict]]:
     """
-    CMA-ES (Covariance Matrix Adaptation Evolution Strategy) optimization.
-
-    CMA-ES is ideal for sparse, multi-modal scoring landscapes because:
-    - No surrogate model needed (GP fails on sparse=0 landscapes)
-    - Maintains a population of candidates, naturally explores multi-modal space
-    - Adapts covariance matrix to find elongated valleys
-    - Very robust: works well even when 90% of evaluations return 0
-
-    Returns: (best_x, best_y, best_score, optimization_history)
+    CMA-ES optimization using the new formula:
+        score(S) = reach(S) × isolation(S) × dominance(S) × bivul_gate(S)
     """
     if not HAS_CMA:
         raise ImportError("cma is required. Install with: pip install cma")
 
-    # Build initial guess from candidates (best candidate centroid)
+    # Build initial guess from candidates
     x0 = [(x_bounds[0] + x_bounds[1]) / 2.0, (y_bounds[0] + y_bounds[1]) / 2.0]
+    best_cand_x, best_cand_y, best_cand_score = x0[0], x0[1], -1.0
     if initial_points:
-        # Use the candidate with the best combined score as initial guess
-        # Filter to only feasible candidates (min_traj_dist constraint)
-        best_cand_score = -1.0
         for pt in initial_points:
-            # Fix 1: skip candidates too close to trajectory
             if traj_pts is not None:
                 d = np.sqrt((traj_pts[:, 0] - pt[0])**2 + (traj_pts[:, 1] - pt[1])**2)
                 if float(np.min(d)) < min_traj_dist:
                     continue
-            sc = score_scalar(frames, pt[0], pt[1], spoofing_range, float('inf'))
-            # Add drift score if motion data available
-            if traj_pts is not None and traj_motion is not None and len(frames) > 0:
-                dr = cumulative_drift_score(
-                    pt[0], pt[1], frames, traj_pts, traj_t, traj_motion,
-                    spoofing_range, distance_threshold, wall_dist,
-                )
-                sc = 0.6 * sc + 0.4 * dr['score']
-            if sc > best_cand_score:
-                best_cand_score = sc
-                x0 = [pt[0], pt[1]]
+            score = new_score_formula(
+                pt[0], pt[1], frames, traj_pts, distance_threshold,
+                graph_dump_dir=graph_dump_dir,
+            )
+            if sc := score['score']:
+                if sc > best_cand_score:
+                    best_cand_score = sc
+                    best_cand_x = pt[0]
+                    best_cand_y = pt[1]
+                    x0 = [pt[0], pt[1]]
 
-    # sigma: step size. ~10% of search range is a good heuristic.
     sigma = min(
         (x_bounds[1] - x_bounds[0]) * 0.08,
         (y_bounds[1] - y_bounds[0]) * 0.08,
         15.0,
     )
 
-    # Bound constraints: CMA-ES expects list of [lb, ub] pairs per dimension
-    # Or None + we clip manually
-    bounds = None  # clip manually in objective
-
     def objective(params):
         sx, sy = params[0], params[1]
-        # Hard bounds clip
         sx = float(np.clip(sx, x_bounds[0], x_bounds[1]))
         sy = float(np.clip(sy, y_bounds[0], y_bounds[1]))
 
-        # Fix 1: hard min_traj_dist constraint — reject infeasible positions
-        # Vectorized: (1, N) - (M, 1) broadcast to (M, N) → min over traj axis
         if traj_pts is not None:
             d_to_traj = np.sqrt(
                 (traj_pts[:, 0] - sx)**2 + (traj_pts[:, 1] - sy)**2
             )
-            actual_min_dist = float(np.min(d_to_traj))
-            if actual_min_dist < min_traj_dist:
-                return 1e18  # CMA-ES minimizes → reject infeasible
+            if float(np.min(d_to_traj)) < min_traj_dist:
+                return 1e18
 
-        # Base score: bi_vul × direction alignment × distance decay
-        base_sc = score_scalar(frames, sx, sy, spoofing_range, float('inf'))
-
-        # Fix 2+3: cumulative drift with motion-awareness
-        if traj_pts is not None and traj_motion is not None and len(frames) > 0:
-            drift_result = cumulative_drift_score(
-                sx, sy, frames, traj_pts, traj_t, traj_motion,
-                spoofing_range, distance_threshold, wall_dist,
-            )
-            drift_sc = drift_result['score']
-            # Normalize both scores to [0, ~1] range before combining.
-            # Bi-Vul base score is typically in the thousands while drift score
-            # is in the tens, so raw weighted sum lets base_sc dominate entirely.
-            base_norm  = base_sc  / (base_sc  + 800.0)
-            drift_norm = drift_sc / (drift_sc + 40.0)
-            # Drift is the ground-truth attack effect; give it dominant weight.
-            combined = 0.15 * base_norm + 0.85 * drift_norm
-        else:
-            combined = base_sc
-
-        return -combined
+        new_res = new_score_formula(
+            sx, sy, frames, traj_pts, distance_threshold,
+            graph_dump_dir=graph_dump_dir,
+        )
+        return -new_res['score']
 
     print(f"  CMA-ES: {n_calls} max evals, sigma={sigma:.1f}, x0=({x0[0]:.1f},{x0[1]:.1f})",
           file=sys.stderr)
 
-    # CMA-ES options
     opts = cma.CMAOptions()
     opts.set('maxfevals', n_calls)
     opts.set('seed', random_state)
-    opts.set('verbose', -9)  # suppress output
+    opts.set('verbose', -9)
     opts.set('popsize', min(20, n_calls // 10 + 1))
 
     es = cma.CMAEvolutionStrategy(x0, sigma, opts)
@@ -851,7 +763,6 @@ def cma_optimize(
         fitness = [objective(x) for x in solutions]
         es.tell(solutions, fitness)
 
-        # Record history
         for x, f in zip(solutions, fitness):
             sc = -f
             if sc > best_score:
@@ -859,112 +770,13 @@ def cma_optimize(
                 best_x, best_y = x[0], x[1]
             history.append({'sx': float(x[0]), 'sy': float(x[1]), 'score': float(sc)})
 
-        # Early stopping if good enough
         if best_score > 5000:
             es.stop()
-
         if es.result.evaluations >= n_calls:
             break
 
     return float(best_x), float(best_y), float(best_score), history
 
-
-# ============================================================================
-# Stage 5: L-BFGS-B Local Refinement
-# ============================================================================
-
-def lbfgsb_refine(
-    frames: List[VulFrame],
-    initial_guesses: List[Tuple[float, float]],
-    spoofing_range: float,
-    distance_threshold: float,
-    x_bounds: Tuple[float, float],
-    y_bounds: Tuple[float, float],
-    max_traj_dist: float,
-    min_traj_dist: float,
-    traj_pts: np.ndarray,
-    wall_dist: float = 15.0,
-) -> List[Dict[str, Any]]:
-    """
-    L-BFGS-B local refinement from multiple starting points.
-
-    Returns: list of refinement results sorted by score descending.
-    """
-    results = []
-
-    for sx0, sy0 in initial_guesses:
-        x0 = np.array([sx0, sy0])
-
-        def neg_objective(x):
-            # Fix 1: hard min_traj_dist constraint — reject infeasible positions
-            if traj_pts is not None:
-                d = np.sqrt((traj_pts[:, 0] - x[0])**2 + (traj_pts[:, 1] - x[1])**2)
-                if float(np.min(d)) < min_traj_dist:
-                    return 1e18  # hard rejection
-
-            # Fix 2+3: hybrid score with cumulative drift + motion awareness
-            base_sc = score_scalar(frames, x[0], x[1], spoofing_range, distance_threshold)
-            if traj_pts is not None and len(frames) > 0:
-                drift_result = cumulative_drift_score(
-                    x[0], x[1], frames, traj_pts,
-                    traj_t=None,
-                    traj_motion=None,
-                    spoofing_range=spoofing_range,
-                    distance_threshold=distance_threshold,
-                    wall_dist=15.0,
-                )
-                return -(0.6 * base_sc + 0.4 * drift_result['score'])
-            return -base_sc
-
-        try:
-            res = minimize(
-                neg_objective,
-                x0=x0,
-                method='L-BFGS-B',
-                bounds=[x_bounds, y_bounds],
-                options={'maxiter': 200, 'ftol': 1e-8},
-            )
-
-            if res.success or res.fun is not None:
-                sx_opt, sy_opt = float(res.x[0]), float(res.x[1])
-                # Use same hybrid score as CMA-ES objective for consistency
-                base_sc = score_scalar(frames, sx_opt, sy_opt, spoofing_range, float('inf'))
-                if traj_pts is not None and len(frames) > 0:
-                    dr = cumulative_drift_score(
-                        sx_opt, sy_opt, frames, traj_pts,
-                        traj_t=None, traj_motion=None,
-                        spoofing_range=spoofing_range,
-                        distance_threshold=distance_threshold,
-                        wall_dist=wall_dist,
-                    )
-                    opt_score = 0.6 * base_sc + 0.4 * dr['score']
-                else:
-                    opt_score = base_sc
-
-                dx_t = traj_pts[:, 0] - sx_opt
-                dy_t = traj_pts[:, 1] - sy_opt
-                actual_min_dist = float(np.min(np.hypot(dx_t, dy_t)))
-
-                results.append({
-                    'sx': sx_opt,
-                    'sy': sy_opt,
-                    'score': opt_score,
-                    'min_traj_dist': actual_min_dist,
-                    'in_band': min_traj_dist <= actual_min_dist <= max_traj_dist,
-                    'lbfgs_success': res.success,
-                    'lbfgs_nit': res.nit,
-                })
-        except Exception:
-            continue
-
-    # Sort by score descending
-    results.sort(key=lambda r: -r['score'])
-    return results
-
-
-# ============================================================================
-# Stage 6: Visualization
-# ============================================================================
 
 def visualize(
     frames: List[VulFrame],
@@ -972,7 +784,6 @@ def visualize(
     bo_history: List[Dict],
     clusters: List[Dict],
     traj_pts: np.ndarray,
-    spoofing_range: float,
     max_traj_dist: float,
     distance_threshold: float,
     output_path: str,
@@ -1019,10 +830,12 @@ def visualize(
 
     ax.scatter(best_pos[0], best_pos[1], c='lime', s=300, marker='*',
                edgecolors='black', linewidths=1.5, zorder=15, label='BO Best')
-    ax.add_patch(plt.Circle(best_pos, spoofing_range, fill=False,
-                            color='orange', lw=1.0, ls=':', alpha=0.5))
+    ax.add_patch(plt.Circle(best_pos, distance_threshold, fill=False,
+                            color='orange', lw=1.0, ls=':', alpha=0.5,
+                            label=f'distance_threshold={distance_threshold}m'))
     ax.add_patch(plt.Circle(best_pos, max_traj_dist, fill=False,
-                            color='lime', lw=1.5, ls='--', alpha=0.8))
+                            color='lime', lw=1.5, ls='--', alpha=0.8,
+                            label=f'max_traj_dist={max_traj_dist}m'))
 
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
@@ -1045,27 +858,36 @@ def visualize(
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # ---- Plot 3: Score heatmap around BO best ----
+    # ---- Plot 3: Score heatmap around BO best (new formula) ----
     ax = axes[2]
     sx0, sy0 = best_pos
     extent = 60.0
-    nx, ny = 60, 60
+    nx, ny = 40, 40
     xs_h = np.linspace(sx0 - extent, sx0 + extent, nx)
     ys_h = np.linspace(sy0 - extent, sy0 + extent, ny)
-    X, Y = np.meshgrid(xs_h, ys_h)
-    Z = np.zeros_like(X)
+    Z = np.zeros((ny, nx))
 
-    positions = np.column_stack([X.ravel(), Y.ravel()])
-    scores_map = score_batch_vectorized(
-        frames, positions, spoofing_range, distance_threshold
-    )
-    Z = scores_map.reshape(nx, ny)
+    # Evaluate new formula on grid
+    for iy in range(ny):
+        for ix in range(nx):
+            # min_traj_dist constraint
+            d_min = float(np.min(np.hypot(traj_pts[:, 0] - xs_h[ix], traj_pts[:, 1] - ys_h[iy])))
+            if d_min < 5.0:  # min_traj_dist heuristic
+                Z[iy, ix] = 0.0
+            else:
+                try:
+                    res = new_score_formula(xs_h[ix], ys_h[iy], frames,
+                                            traj_pts, distance_threshold,
+                                            graph_dump_dir=None)
+                    Z[iy, ix] = res['score']
+                except Exception:
+                    Z[iy, ix] = 0.0
 
     im = ax.imshow(Z, extent=[xs_h[0], xs_h[-1], ys_h[0], ys_h[-1]],
                    origin='lower', cmap='hot', aspect='equal')
-    plt.colorbar(im, ax=ax, label='Score')
+    plt.colorbar(im, ax=ax, label='Score (reach×isolation×dominance×bivul)')
     ax.scatter(sx0, sy0, c='lime', s=200, marker='*', edgecolors='white',
-               linewidths=1.5, zorder=15, label='BO Best')
+               linewidths=1.5, zorder=15, label='CMA-ES Best')
     ax.plot(traj_pts[:, 0], traj_pts[:, 1], 'b-', lw=0.8, alpha=0.5)
     ax.add_patch(plt.Circle((sx0, sy0), max_traj_dist, fill=False,
                             color='lime', lw=1.5, ls='--', alpha=0.8))
@@ -1174,26 +996,13 @@ def load_traj(traj_path: str) -> Tuple[np.ndarray, np.ndarray]:
 # ============================================================================
 
 def run_pipeline(args) -> Dict[str, Any]:
-    """Execute the full Bi-SMVS BO pipeline."""
-
-    # ---- Load data ----
+    """Execute the spoofer selection pipeline."""
     print("Loading data...", file=sys.stderr)
     frames = load_frames(args.smvs, args.vul, args.top_k)
     traj_pts, traj_t = load_traj(args.traj)
     print(f"  frames: {len(frames)}", file=sys.stderr)
     print(f"  traj pts: {len(traj_pts)}", file=sys.stderr)
 
-    # Fix 3: Compute trajectory motion quality factors
-    # (for motion-aware cumulative drift scoring)
-    traj_motion = compute_traj_motion_factors(
-        traj_pts[:, 0], traj_pts[:, 1], traj_t,
-        speed_thresh=1.0, curv_thresh=0.05,
-    )
-    straight_pct = 100.0 * (traj_motion >= 0.8).mean()
-    print(f"  Motion: {straight_pct:.0f}% straight-cruise, "
-          f"{(traj_motion < 0.5).sum()} turn/accel frames", file=sys.stderr)
-
-    # Trajectory info (used for logging / debug)
     xs_t = traj_pts[:, 0]; ys_t = traj_pts[:, 1]
     traj_info = {
         'length_m': float(np.sum(np.hypot(np.diff(xs_t), np.diff(ys_t)))),
@@ -1202,28 +1011,28 @@ def run_pipeline(args) -> Dict[str, Any]:
         'span_m': float(math.sqrt((xs_t.max()-xs_t.min())**2 + (ys_t.max()-ys_t.min())**2)),
         'n_pts': len(traj_pts),
     }
-    print(f"  traj span: {traj_info['span_x']:.1f}m × {traj_info['span_y']:.1f}m", file=sys.stderr)
+    print(f"  traj span: {traj_info['span_x']:.1f}m x {traj_info['span_y']:.1f}m", file=sys.stderr)
 
-    # ---- Stage 1: Sort by Bi-SMVS, select top-K ----
+    # ---- Select top-K frames by Bi-SMVS ----
     frames_sorted = sorted(frames, key=lambda f: -f.bi_smvs)
     top_frames = frames_sorted[:args.top_k]
     print(f"  Top-{args.top_k} frames: Bi-SMVS range [{top_frames[-1].bi_smvs:.0f}, {top_frames[0].bi_smvs:.0f}]", file=sys.stderr)
 
-    # ---- Stage 2: Spatial-directional clustering ----
-    print("\n[Stage 2] Spatial-directional clustering...", file=sys.stderr)
+    # ---- Spatial-directional clustering ----
+    print("\n[Clustering] Spatial-directional clustering...", file=sys.stderr)
     clusters = spatial_directional_clustering(
         top_frames,
         eps_spatial=args.cluster_eps,
         eps_dir=45.0,
     )
     print(f"  Found {len(clusters)} cluster(s)", file=sys.stderr)
-    for i, c in enumerate(clusters):
+    for i_c, c in enumerate(clusters):
         n_dirs = len(c['dominant_dirs'])
-        print(f"  Cluster {i+1}: centroid=({c['centroid'][0]:.1f},{c['centroid'][1]:.1f}), "
+        print(f"  Cluster {i_c+1}: centroid=({c['centroid'][0]:.1f},{c['centroid'][1]:.1f}), "
               f"total_vul={c['total_vul']:.0f}, frames={len(c['frames'])}, dominant_dirs={n_dirs}", file=sys.stderr)
 
-    # ---- Stage 3: Generate candidates ----
-    print("\n[Stage 3] Candidate generation...", file=sys.stderr)
+    # ---- Generate candidates ----
+    print("\n[Candidates] Generating from clusters...", file=sys.stderr)
     candidates = generate_candidates_from_clusters(
         clusters, traj_pts,
         spoofing_range=args.spoofing_range,
@@ -1232,7 +1041,6 @@ def run_pipeline(args) -> Dict[str, Any]:
     )
     print(f"  Generated {len(candidates)} initial candidates", file=sys.stderr)
 
-    # Search bounds from trajectory + margin
     x_min = float(traj_pts[:, 0].min()) - 50.0
     x_max = float(traj_pts[:, 0].max()) + 50.0
     y_min = float(traj_pts[:, 1].min()) - 50.0
@@ -1240,105 +1048,58 @@ def run_pipeline(args) -> Dict[str, Any]:
     x_bounds = (x_min, x_max)
     y_bounds = (y_min, y_max)
 
-    # ---- Stage 4: Bayesian Optimization ----
-    print(f"\n[Stage 4] CMA-ES Global Optimization...", file=sys.stderr)
+    # ---- CMA-ES Optimization ----
+    print(f"\n[CMA-ES] Running optimization...", file=sys.stderr)
     bo_x, bo_y, bo_score, bo_history = cma_optimize(
         top_frames,
         x_bounds, y_bounds,
-        spoofing_range=args.spoofing_range,
         n_calls=args.cma_calls,
         initial_points=candidates,
         random_state=args.seed,
         traj_pts=traj_pts,
-        traj_t=traj_t,
-        traj_motion=traj_motion,
-        wall_dist=args.wall_dist,
         distance_threshold=args.distance_threshold,
         min_traj_dist=args.min_traj_dist,
+        graph_dump_dir=args.graph_dump_dir,
     )
+
+    score_components = {}
+    try:
+        score_components = new_score_formula(
+            bo_x, bo_y, top_frames, traj_pts, args.distance_threshold,
+            graph_dump_dir=args.graph_dump_dir,
+            bivul_gate_threshold=args.bivul_gate_threshold,
+        )
+    except Exception as exc:
+        print(f"[WARN] new_score_formula failed on final pos: {exc}", file=sys.stderr)
 
     dx_t = traj_pts[:, 0] - bo_x
     dy_t = traj_pts[:, 1] - bo_y
     bo_min_dist = float(np.min(np.hypot(dx_t, dy_t)))
-    print(f"  BO best: ({bo_x:.2f}, {bo_y:.2f}) score={bo_score:.2f} min_dist={bo_min_dist:.2f}m", file=sys.stderr)
+    print(f"  Best: ({bo_x:.2f}, {bo_y:.2f}) score={bo_score:.4f} min_dist={bo_min_dist:.2f}m", file=sys.stderr)
 
-    # ---- Stage 5: L-BFGS-B refinement ----
-    print(f"\n[Stage 5] L-BFGS-B refinement from top BO candidates...", file=sys.stderr)
-
-    # Build initial guess list: BO best + top 5 BO history + top candidates
-    refine_init = [(bo_x, bo_y)]
-    top_bo = sorted(bo_history, key=lambda h: -h['score'])[:5]
-    for h in top_bo:
-        refine_init.append((h['sx'], h['sy']))
-    refine_init += [(c[0], c[1]) for c in candidates[:10]]
-
-    lbfgsb_results = lbfgsb_refine(
-        top_frames,
-        refine_init,
-        spoofing_range=args.spoofing_range,
-        distance_threshold=args.distance_threshold,
-        x_bounds=x_bounds,
-        y_bounds=y_bounds,
-        max_traj_dist=args.max_traj_dist,
-        min_traj_dist=args.min_traj_dist,
-        traj_pts=traj_pts,
-        wall_dist=args.wall_dist,
-    )
-
-    # Compare CMA-ES and L-BFGS-B results — pick the better score
-    if lbfgsb_results:
-        best_lbfgs = lbfgsb_results[0]
-        print(f"  L-BFGS-B best: ({best_lbfgs['sx']:.2f}, {best_lbfgs['sy']:.2f}) "
-              f"score={best_lbfgs['score']:.2f} min_dist={best_lbfgs['min_traj_dist']:.2f}m "
-              f"success={best_lbfgs['lbfgs_success']}", file=sys.stderr)
-
-        # Choose the better of CMA-ES and L-BFGS-B
-        if best_lbfgs['score'] >= bo_score:
-            final_x, final_y, final_score = best_lbfgs['sx'], best_lbfgs['sy'], best_lbfgs['score']
-            final_min_dist = best_lbfgs['min_traj_dist']
-            print(f"  → L-BFGS-B better, using its result", file=sys.stderr)
-        else:
-            final_x, final_y, final_score = bo_x, bo_y, bo_score
-            final_min_dist = bo_min_dist
-            print(f"  → CMA-ES better (score={bo_score:.2f}), keeping it", file=sys.stderr)
-    else:
-        final_x, final_y, final_score = bo_x, bo_y, bo_score
-        final_min_dist = bo_min_dist
-        lbfgsb_results = []
-
-    # ---- Visualization ----
     if args.visualize:
         print(f"\n[Visualization]...", file=sys.stderr)
         visualize(
             frames=top_frames,
-            best_pos=(final_x, final_y),
+            best_pos=(bo_x, bo_y),
             bo_history=bo_history,
             clusters=clusters,
             traj_pts=traj_pts,
-            spoofing_range=args.spoofing_range,
             max_traj_dist=args.max_traj_dist,
             distance_threshold=args.distance_threshold,
             output_path=args.viz_path,
         )
 
-    # ---- Build output ----
     output = {
-        "method": "bi_smvs_bayesian_optimization",
+        "method": "bi_smvs_cma_optimization",
         "optim": {
-            "spoofer_x": float(final_x),
-            "spoofer_y": float(final_y),
-            "score": float(final_score),
-            "min_traj_dist": float(final_min_dist),
-            "in_band": float(args.min_traj_dist) <= float(final_min_dist) <= float(args.max_traj_dist),
-            "bo_best": {
-                "spoofer_x": float(bo_x),
-                "spoofer_y": float(bo_y),
-                "score": float(bo_score),
-                "min_traj_dist": float(bo_min_dist),
-            },
+            "spoofer_x": float(bo_x),
+            "spoofer_y": float(bo_y),
+            "score": float(bo_score),
+            "min_traj_dist": float(bo_min_dist),
+            "in_band": float(args.min_traj_dist) <= float(bo_min_dist) <= float(args.max_traj_dist),
         },
-        "lbfgsb_refinements": lbfgsb_results[:10],
-        "bo_history": bo_history,
+        "cma_history": bo_history,
         "clusters": [
             {
                 "centroid": c['centroid'],
@@ -1354,24 +1115,19 @@ def run_pipeline(args) -> Dict[str, Any]:
             "min_traj_dist": args.min_traj_dist,
             "max_traj_dist": args.max_traj_dist,
             "distance_threshold": float(args.distance_threshold),
-            "wall_dist": args.wall_dist,
             "cma_calls": args.cma_calls,
             "cluster_eps": args.cluster_eps,
             "seed": args.seed,
         },
         "trajectory_info": traj_info,
+        "score_components": score_components,
     }
-
     return output
 
 
-# ============================================================================
-# Argument Parsing
-# ============================================================================
-
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Bi-SMVS-driven Bayesian Optimization for spoofer selection"
+        description="Bi-SMVS-driven CMA-ES Optimization for spoofer selection"
     )
     parser.add_argument("--smvs", required=True,
                         help="SMVS CSV (Bi-SMVS, with x,y,frame_bi_smvs,vul_angle_deg)")
@@ -1382,12 +1138,9 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=20,
                         help="Use top-k highest-Bi-SMVS frames. Default: 20")
     parser.add_argument("--spoofing-range", type=float, default=80.0,
-                        help="Spoofing attack angular window (degrees, total width). "
-                             "Must match attack config. Default: 80.0")
+                        help="Spoofing attack angular window (degrees, total width). Default: 80.0")
     parser.add_argument("--distance-threshold", type=float, default=15.0,
                         help="Attack trigger distance (m). Default: 15.0")
-    parser.add_argument("--wall-dist", type=float, default=15.0,
-                        help="Injected false-wall distance (m). Default: 15.0")
     parser.add_argument("--min-traj-dist", type=float, default=5.0,
                         help="Min distance from spoofer to trajectory (m). Default: 5.0")
     parser.add_argument("--max-traj-dist", type=float, default=30.0,
@@ -1398,18 +1151,19 @@ def parse_args():
                         help="Spatial clustering epsilon (m). Default: 40.0")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed. Default: 42")
+    parser.add_argument("--graph-dump-dir",
+                        help="Path to pre-dumped LVI-SAM factor graph JSON files "
+                             "(from $LVI_GRAPH_DUMP_DIR). Used for isolation and dominance computation.")
+    parser.add_argument("--bivul-gate-threshold", type=float, default=0.15,
+                        help="Minimum normalized bi_vul in attack window for bi-vul gate. Default: 0.15")
     parser.add_argument("--output", default=None,
                         help="Output JSON path")
     parser.add_argument("--visualize", action="store_true",
                         help="Generate visualization PNG")
-    parser.add_argument("--viz-path", default="spoofer_bi_bo_visualization.png",
+    parser.add_argument("--viz-path", default="spoofer_bo_visualization.png",
                         help="Visualization output path")
     return parser.parse_args()
 
-
-# ============================================================================
-# Main
-# ============================================================================
 
 def main():
     args = parse_args()
@@ -1417,11 +1171,13 @@ def main():
     result = run_pipeline(args)
 
     print(f"\n{'='*60}", file=sys.stderr)
-    print(f"=== Bi-SMVS BO Result ===", file=sys.stderr)
+    print(f"=== Bi-SMVS BO Result (with Graph Betweenness) ===", file=sys.stderr)
     print(f"  Position: ({result['optim']['spoofer_x']:.2f}, {result['optim']['spoofer_y']:.2f})", file=sys.stderr)
     print(f"  Score:    {result['optim']['score']:.2f}", file=sys.stderr)
     print(f"  Min dist: {result['optim']['min_traj_dist']:.2f}m", file=sys.stderr)
     print(f"  In band:  {result['optim']['in_band']}", file=sys.stderr)
+    bc = result.get('betweenness', {})
+    print(f"  BC stats: min={bc.get('min', 0):.4f} max={bc.get('max', 0):.4f} mean={bc.get('mean', 0):.4f}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 
     if args.output:

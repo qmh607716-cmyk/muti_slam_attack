@@ -357,6 +357,27 @@ def compute_attack_metrics(orig_df: pd.DataFrame, att_df: pd.DataFrame,
                 mask = raw_err_2d > thresh
                 attack_metrics[f"onset_{thresh:.1f}m_s"] = float(t_grid[np.argmax(mask)]) if mask.any() else None
 
+            # Peak deviation inside zone (what the attack actually achieved)
+            attack_metrics["zone_max_2d_m"] = float(zone_err.max())
+            attack_metrics["zone_max_2d_idx"] = int(np.where(in_zone)[0][int(np.argmax(zone_err))])
+            attack_metrics["zone_p99_2d_m"] = float(np.percentile(zone_err, 99))
+            attack_metrics["zone_p95_2d_m"] = float(np.percentile(zone_err, 95))
+
+            # Out-of-zone baseline (SLAM noise without attack)
+            out_zone = ~in_zone
+            if out_zone.any():
+                out_err = raw_err_2d[out_zone]
+                attack_metrics["out_zone_rmse_2d_m"] = float(np.sqrt(np.mean(out_err ** 2)))
+                attack_metrics["out_zone_max_2d_m"] = float(out_err.max())
+                attack_metrics["attack_to_noise_ratio"] = float(
+                    attack_metrics["zone_rmse_2d_m"] /
+                    max(attack_metrics["out_zone_rmse_2d_m"], 1e-6)
+                )
+            else:
+                attack_metrics["out_zone_rmse_2d_m"] = None
+                attack_metrics["out_zone_max_2d_m"] = None
+                attack_metrics["attack_to_noise_ratio"] = None
+
             # Drift velocity inside zone
             zone_t = t_grid[in_zone]
             if len(zone_t) > 2:
@@ -622,6 +643,9 @@ def main():
     parser.add_argument("--spoofing-range", type=float, default=None)
     parser.add_argument("--spoofer-heading", type=float, default=None)
     parser.add_argument("--skip-evo", action="store_true", help="Skip evo")
+    parser.add_argument("--success-threshold", type=float, default=4.2,
+                        help="APE-RMSE threshold (m) for attack_success. "
+                             "Default 4.2 (SLAMSpoof ICRA'25); use 1.0 for KITTI odometry paper.")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -756,9 +780,10 @@ def main():
         print(f"  APE  rotation    RMSE:  {ape_rotation_deg_stats.get('rmse', 0):.4f} deg")
     print(f"  RPE  translation  max:  {paper_rpe_max_m:.4f} m   <-- headline")
     print(f"  RPE  rotation     max:  {paper_rpe_max_deg:.4f} deg")
+    success_thr = float(args.success_threshold)
     if paper_ape_translation_rmse is not None:
-        verdict = "ATTACK SUCCESS (>=4.2m)" if paper_ape_translation_rmse >= 4.2 else "no effect (<4.2m)"
-        print(f"  --> APE-RMSE verdict: {verdict}  (paper threshold = 4.2m)")
+        verdict = f"ATTACK SUCCESS (>={success_thr:.2f}m)" if paper_ape_translation_rmse >= success_thr else f"no effect (<{success_thr:.2f}m)"
+        print(f"  --> APE-RMSE verdict: {verdict}  (threshold = {success_thr:.2f}m)")
 
     print("\n-- evo APE translation (Umeyama SE(3) aligned) --")
     if ape_translation_stats:
@@ -838,8 +863,8 @@ def main():
         "ape_rotation_rmse_deg": ape_rotation_deg_stats.get("rmse") if ape_rotation_deg_stats else None,
         "rpe_translation_max_m": paper_rpe_max_m,
         "rpe_rotation_max_deg": paper_rpe_max_deg,
-        "success_threshold_m": 4.2,
-        "attack_success": bool(paper_ape_translation_rmse is not None and paper_ape_translation_rmse >= 4.2),
+        "success_threshold_m": success_thr,
+        "attack_success": bool(paper_ape_translation_rmse is not None and paper_ape_translation_rmse >= success_thr),
         "note": "APE-RMSE translation + max(RPE) follow SLAMSpoof ICRA'25 Section IV-A",
     }
 

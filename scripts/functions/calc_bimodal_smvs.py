@@ -455,36 +455,6 @@ def frame_visual_smvs(v_vul, step_deg=5.0, d_th=None) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Spatial Coherence Factor (SCF) — penalises "void" frames
-# ---------------------------------------------------------------------------
-
-def spatial_coherence_factor(l_vul: np.ndarray) -> float:
-    """
-    Spatial Coherence Factor: penalises frames where LiDAR provides weak
-    structure across all directions.
-
-    SCF = mean(l_vul) / peak(l_vul)
-
-    Interpretation:
-      - All directions weak  → mean low, peak low  → SCF → 0  → strong penalise
-      - One direction dominant + others weak → mean << peak → SCF small → penalise
-      - All directions equally strong → mean ≈ peak → SCF ≈ 1 → no penalise
-
-    The key insight: if mean(l_vul) is very low (~15), the LiDAR has no
-    reliable structure to localise against → even a high L-Vul direction points
-    into "void" → spoofer cannot reach it.
-
-    Returns:
-        SCF in (0, 1], where 1 = no penalisation
-    """
-    peak = float(np.max(l_vul))
-    mean = float(np.mean(l_vul))
-    if peak < 1e-9:
-        return 0.0
-    return mean / peak
-
-
-# ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 

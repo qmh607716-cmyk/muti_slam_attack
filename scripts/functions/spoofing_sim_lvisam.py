@@ -182,8 +182,11 @@ def _synth_noise_records(n: int,
     if n <= 0:
         return np.zeros((0, point_step), dtype=np.uint8)
 
-    theta_deg = rng.uniform(center_deg - half_range_deg,
-                            center_deg + half_range_deg,
+    # center_deg uses the (atan2(y,x)+180)%360 convention shared with
+    # polar_mask_2d. cos/sin expect atan2 convention, so subtract 180.
+    center_atn2 = (center_deg - 180.0) % 360.0
+    theta_deg = rng.uniform(center_atn2 - half_range_deg,
+                            center_atn2 + half_range_deg,
                             size=n)
     theta_deg = theta_deg % 360.0
     theta_rad = np.radians(theta_deg)
@@ -227,8 +230,10 @@ def _synth_wall_records_original(n: int,
     if n <= 0:
         return np.zeros((0, point_step), dtype=np.uint8)
 
-    theta_deg = rng.uniform(center_deg - half_range_deg,
-                            center_deg + half_range_deg,
+    # center_deg uses (atan2(y,x)+180)%360 convention; convert to atan2 for cos/sin.
+    center_atn2 = (center_deg - 180.0) % 360.0
+    theta_deg = rng.uniform(center_atn2 - half_range_deg,
+                            center_atn2 + half_range_deg,
                             size=n)
     theta_deg = theta_deg % 360.0
     theta_rad = np.radians(theta_deg)
@@ -332,9 +337,11 @@ def _square_wall_records(
     if n <= 0:
         return np.zeros((0, point_step), dtype=np.uint8)
 
+    # center_deg uses (atan2(y,x)+180)%360 convention; convert to atan2 for cos/sin.
+    center_atn2 = (center_deg - 180.0) % 360.0
     theta_deg = rng.uniform(
-        center_deg - half_range_deg,
-        center_deg + half_range_deg,
+        center_atn2 - half_range_deg,
+        center_atn2 + half_range_deg,
         size=n,
     )
     theta_deg = theta_deg % 360.0
