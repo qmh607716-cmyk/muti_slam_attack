@@ -1,44 +1,42 @@
-# LV-SLAM Attack
+# SLAMSpoof Attack Framework
 
 ## 概述
-SLAMSpoof (ICRA 2025) LiDAR 欺骗攻击框架移植到 **LVI-SAM**类LiDAR-视觉-惯性耦合SLAM系统
 
+基于 SLAMSpoof (ICRA 2025) 的 LiDAR 欺骗攻击框架，移植到 **LVI-SAM**（视觉-激光-惯性紧耦合类 SLAM 系统）。
 
-### 1. `removal` — HFR 噪声攻击
-删除攻击窗口内真实点，注入随机噪声点。模拟硬件干扰或信号阻塞。
+核心流程：**因子图分析 → 脆弱性评估 → Spoofer 位置优化 → 攻击注入 → 轨迹对比**
 
-### 2. `static` — 假墙注入
+### 攻击模型
 
-**原版**：圆柱形均匀假墙（`original_random`），在 `wall_dist` 距离上均匀注入伪造点，几何约束分散。
+| 模式 | 描述 |
+|------|------|
+| `removal` | 删除攻击窗口内真实点，注入随机噪声（模拟硬件干扰） |
+| `static` | 注入固定距离假墙，强迫 SLAM 估计向欺骗方向偏移 |
+| `dynamic` | 假墙距离周期性振荡，利用因子图约束传导放大偏移 |
 
-**扩展**（由 D-SLAMSpoof 论文提出 `square`/`corner`，其余为本工作）：
+`static` 模式支持多种几何注入模型：
 
 | 模型 | 来源 | 描述 |
-|---|---|---|
-| `original_random` | 原版 | 均匀随机角度分布的圆柱墙，几何约束分散 |
-| `beam_project` | 本工作 | 沿原 scan line 方向投影到固定距离，继承 ring/time |
-| `square` | D-SLAMSpoof | 菱形集中几何（极坐标方程），约束集中在边缘方向 |
+|------|------|------|
+| `original_random` | 原版 | 均匀随机角度圆柱墙，几何约束分散 |
+| `beam_project` | 本工作 | 沿 scan line 方向投影到固定距离，继承 ring/time |
+| `square` | D-SLAMSpoof | 菱形几何，约束集中在边缘方向 |
 | `corner` | D-SLAMSpoof | L 形墙角（square + rotate=0），两侧边缘面向 LiDAR |
-
-
-### 3. `dynamic` — 动墙注入
-墙距离在 `[wall_distance_min, wall_distance_max]` 之间周期性振荡，周期由 $M_{corr}$ 自动推导：
-```
-t_cycle = (d_max - d_min) / M_corr × Δt
-```
-该周期是**最快且不被 outlier filtering 拒绝**的振荡频率。
 
 ---
 
 ## 快速开始
 
 ### 需求
+
 - ROS Noetic + Catkin Tools
 - LVI-SAM（`~/catkin_ws/devel_catkin_tools`）
-- `small_gicp`（G-ICP 后端）
-- 数据集：`~/catkin_ws/src/LVI-SAM/datasets/xxx.bag`
+- LIO-SAM（`~/catkin_ws/devel_catkin_tools`）
+- `small_gicp`（G-ICP 后端，用于 LVI-SAM）
+- 数据集：`~/catkin_ws/src/LVI-SAM/datasets/*.bag`
 
 ### 环境准备
+
 ```bash
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel_catkin_tools/setup.bash
@@ -47,6 +45,36 @@ source ~/catkin_ws/devel_catkin_tools/setup.bash
 ---
 
 ## 完整实验流程
+
+> **代理模型说明**：LIO-SAM 作为 LVI-SAM 的简化代理模型。通过代理模型快速获取因子图结构，用于分析定位约束的连通性和隔离性，指导 Spoofer 位置优化。
+
+### 阶段 0：LIO-SAM 代理模型采集因子图（可选，推荐先行）
+
+> 通过 LIO-SAM 快速获取因子图结构。
+> LIO-SAM 仅有 LiDAR-IMU 约束，**无 loop closure**，代表定位脆弱性的上界（最差情况）。
+
+
+```bash
+# ========== 终端 1 ==========
+source /opt/ros/noetic/setup.bash
+source ~/catkin_ws/devel_catkin_tools/setup.bash
+rosparam set use_sim_time true
+
+# 设置 dump 输出目录（与 LVI-SAM 相同路径，共享同一 pipeline）
+export LIO_GRAPH_DUMP_DIR=/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/graph_dumps
+rm -f $LIO_GRAPH_DUMP_DIR/dump_*.json
+
+roslaunch slamspoof run_lio_sam.launch
+
+# ========== 终端 2（等终端 1 全部节点启动后再播放）==========
+source /opt/ros/noetic/setup.bash
+rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock
+```
+
+bag 播放完成后，`$LIO_GRAPH_DUMP_DIR` 下生成约 4000+ 个 `dump_XXXXX.json` 文件。
+LIO-SAM 仅含 odometry 因子（无 loop closure），节点数量与 bag 时长约 1:1（每秒约 2-3 个关键帧）。
+
+---
 
 ### 阶段 1：录制原始轨迹（基线）
 
@@ -61,21 +89,22 @@ roslaunch lvi_sam run.launch
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel_catkin_tools/setup.bash
 mkdir -p ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original
-rosbag record -O ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.bag /lvi_sam/lidar/mapping/odometry
+rosbag record -O ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.bag \
+    /lvi_sam/lidar/mapping/odometry
 
 # ========== 终端 3 ==========
 source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel_catkin_tools/setup.bash
 rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock --pause
 ```
 
-bag 播放完毕后（终端 3 自动结束），提取轨迹：
+bag 播放完毕后，提取轨迹：
 
 ```bash
 python3 ~/catkin_ws/src/slamspoof/scripts/extract_lvisam_odom_csv.py \
     --bag ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.bag \
     --out ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv
 ```
+
 ---
 
 ### 阶段 2：采集双模态 SMVS
@@ -90,43 +119,59 @@ roslaunch lvi_sam run.launch
 # ========== 终端 2 ==========
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel_catkin_tools/setup.bash
-roslaunch slamspoof_icra run_bimodal_smvs_lvisam.launch
+roslaunch slamspoof run_bimodal_smvs_lvisam.launch
 
 # ========== 终端 3 ==========
 source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel_catkin_tools/setup.bash
 rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock
 ```
 
 输出文件（由 launch 文件 `smvs_save_dir` / `vulnerablity_save_dir` 参数指定）：
 ```
 slamspoof_handheld/smvs/{timestamp}.csv      # 帧级 SMVS 分数
-slamspoof_handheld/vul/vul_{timestamp}.csv  # 分方向脆弱性
+slamspoof_handheld/vul/vul_{timestamp}.csv    # 分方向脆弱性
 ```
 
 ---
 
-### 阶段 3：选择 Spoofer 位置
+### 阶段 3：选择 Spoofer 位置（SMVS + 因子图引导）
+
+> `--graph-dump-dir` 参数可使用阶段 0（LIO-SAM）或之前 LVI-SAM 运行的 dump 目录。
 
 ```bash
 # 【重要】将路径替换为阶段 2 新生成的 CSV 文件
-python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_from_bimodal.py \
+python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_bi_bo.py \
     --smvs ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/smvs/{timestamp}.csv \
-    --vul  ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/vul/vul_{timestamp}.csv \
-    --score-column frame_bi_smvs \
-    --score-threshold 0.0 \
-    --top-k 10 \
-    --verbose \
-    --match-mode nearest_xy
+    --vul  ~/cat_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/vul/vul_{timestamp}.csv \
+    --traj ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv \
+    --graph-dump-dir ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/graph_dumps \
+    --top-k 20 \
+    --distance-threshold 15.0 \
+    --spoofing-range 80.0 \
+    --cma-calls 200 \
+    --verbose
 ```
 
-输出中的 `spoofer_x` 和 `spoofer_y` 填入 `config_lvisam.json`（见下阶段）
+**评分公式**：
+
+```
+score(S) = 0.35 · reach(S) + 0.25 · isolation(S) + 0.25 · dominance(S) + 0.15 · bivul(S)
+```
+
+| 因子 | 含义 |
+|------|------|
+| `reach` | 攻击范围内可到达的轨迹点数比例 |
+| `isolation` | 定位图中受影响节点的隔离程度（loop closure 越少越容易被攻击） |
+| `dominance` | LiDAR 约束在受影响节点的占比（越高越依赖 LiDAR，越脆弱） |
+| `bivul` | 攻击窗口内的平均双模态脆弱性 |
+
+输出中的 `bo_x` 和 `bo_y` 即最优 Spoofer 世界坐标，填入阶段 4 配置。
 
 ---
 
 ### 阶段 4：生成攻击 Rosbag
 
-修改配置（config_lvisam：修改路径/攻击模式/攻击参数）：
+修改配置（`config_lvisam.json`）：
 
 ```json
 {
@@ -146,9 +191,10 @@ python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_from_bimodal.py \
 生成攻击 bag：
 
 ```bash
-        source /opt/ros/noetic/setup.bash
-	source ~/catkin_ws/devel_catkin_tools/setup.bash
-	roslaunch slamspoof_icra rosbag_editer_lvisam.launch config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam.json
+source /opt/ros/noetic/setup.bash
+source ~/catkin_ws/devel_catkin_tools/setup.bash
+roslaunch slamspoof rosbag_editer_lvisam.launch \
+    config_file_path:=/home/qu_menghao/catkin_ws/src/slamspoof/config_lvisam.json
 ```
 
 ---
@@ -171,7 +217,6 @@ rosbag record -O ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_stat
 
 # ========== 终端 3 ==========
 source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel_catkin_tools/setup.bash
 rosbag play ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_static/handheld_attack_static.bag --clock
 ```
 
@@ -188,13 +233,13 @@ python3 ~/catkin_ws/src/slamspoof/scripts/extract_lvisam_odom_csv.py \
 ### 阶段 6：轨迹对比
 
 ```bash
-
 python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
-	    --orig ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv \
-	    --att ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_static/smvs/handheld_attack_static_traj.csv \
-	    --out-dir ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/eval \
-	    --title "handheld: static attack" \
-	    --spoofer-x xxx --spoofer-y xxx --distance-threshold xx
+    --orig ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv \
+    --att  ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_static/handheld_attack_static_traj.csv \
+    --out-dir ~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/eval \
+    --title "handheld: static attack (square)" \
+    --spoofer-x <阶段3输出> --spoofer-y <阶段3输出> \
+    --distance-threshold 15.0
 ```
 
 ---
@@ -202,20 +247,57 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
 ## 关键参数说明
 
 | 参数 | 说明 | 常用值 |
-|---|---|---|
+|------|------|--------|
 | `spoofing_mode` | 攻击模式 | `removal` / `static` / `dynamic` |
 | `spoofer_x/y` | Spoofer 世界坐标 | 从阶段 3 获取 |
-| `distance_threshold` | 触发半径 | 15 ~30m |
+| `distance_threshold` | 触发半径 | 15 ~ 30 m |
 | `spoofing_range` | 攻击窗口总角度 | 80° |
 | `wall_dist` | 假墙固定距离（static） | 15 m |
 | `wall_distance_min/max` | 动墙距离范围（dynamic） | 5 ~ 25 m |
-| `static_geometry_model` | 假墙几何 | `original_random` / `beam_project` / `square` / `corner` |
+| `static_geometry_model` | 假墙几何模型 | `original_random` / `beam_project` / `square` / `corner` |
 | `square_rotate_rad` | 菱形旋转角 | 0（corner）/ π/4（平面） |
 | `M_corr` | SLAM 最大对应距离 | 1.0 m（LVI-SAM） |
 | `auto_cycle` | 自动推导最优振荡周期 | `true` |
+| `LIO_GRAPH_DUMP_DIR` | 因子图 dump 输出目录 | `~/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/graph_dumps` |
+| `--graph-dump-dir` | Spoofer 选择脚本的因子图路径 | 指向 `LIO_GRAPH_DUMP_DIR` |
 
+---
 
+## 因子图 Dump 格式说明
 
+LIO-SAM 和 LVI-SAM 的因子图均以 JSON 格式 dump，字段完全兼容，可共用同一 pipeline。
+
+**节点格式**（每个 `dump_XXXXX.json` 的 `nodes` 数组）：
+
+```json
+{
+  "id": 0,
+  "x": 0.0, "y": 0.0, "z": 0.0,
+  "qx": 0.1136, "qy": 0.0114, "qz": -0.0013, "qw": 0.9935
+}
+```
+
+**因子格式**（`factors` 数组中的每个因子）：
+
+```json
+{
+  "fidx": 0,
+  "type": "BetweenFactor",
+  "keys": ["X0", "X1"],
+  "tx": 0.0, "ty": 0.0, "tz": 0.0,
+  "roll": 0.0, "pitch": 0.0, "yaw": 0.0,
+  "noise": [0.000001, 0.000001, 0.000001, 0.0001, 0.0001, 0.0001],
+  "source": "odometry"
+}
+```
+
+| source 值 | 含义 |
+|-----------|------|
+| `prior` | 先验因子（首节点） |
+| `odometry` | LiDAR 或 IMU 里程计因子 |
+| `loop_closure` | 回环检测因子（LVI-SAM 专有） |
+
+**多文件拼接**：因子图分布在多个增量 dump 文件中（每个关键帧一次），`select_spoofer_bi_bo.py` 的 `_precompute_graph_data()` 自动加载所有 dump 并拼接为完整图。
 
 ---
 
@@ -226,8 +308,8 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
   title={SLAMSpoof: Practical LiDAR Spoofing Attacks on Localization
          Systems Guided by Scan Matching Vulnerability Analysis},
   author={Nagata, R. and Koide, K. and Hayakawa, Y. and Suzuki, R.
-          and Ikeda, K. and Sako, O. and Chen, Q.A. and Sato, T.
-          and Yoshioka, K.},
+           and Ikeda, K. and Sako, O. and Chen, Q.A. and Sato, T.
+           and Yoshioka, K.},
   booktitle={ICRA},
   year={2025}
 }
@@ -241,3 +323,13 @@ python3 ~/catkin_ws/src/slamspoof/scripts/evaluate_attack.py \
   year={2021}
 }
 
+@inproceedings{liosam2021shan,
+  title={LIO-SAM: Tightly-coupled Lidar Inertial Odometry via
+         Smoothing and Mapping},
+  author={Shan, T. and Englot, B. and Meyers, D. and Wang, W.
+          and Ratti, C. and Rus, D.},
+  booktitle={ICRA},
+  pages={5692--5698},
+  year={2021}
+}
+```

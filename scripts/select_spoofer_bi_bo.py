@@ -23,12 +23,12 @@ Improvements over select_spoofer_continuous_opt.py:
    with CMA-ES evolution strategy. CMA-ES is ideal for sparse, multi-modal
    scoring landscapes where GP-based BO fails completely. ~200 evals in < 1 minute.
 
-4. GRAPH BETWEEENNESS WEIGHTING (attack propagation potential)
-   Frames are weighted by their betweenness centrality in the trajectory factor graph:
-     - Bi-SMVS/Bi-Vul: measures "can we spoof here?" (attack feasibility)
-     - Betweenness: measures "if spoofed, will attack spread and resist correction?"
-     - Combined score = Bi-Vul × motion × betweenness → prioritizes positions
-       where frames are both easily spoofed AND sit at graph hubs.
+4. STRUCTURAL ISOLATION + DOMINANCE (attack persistence)
+   After reachability, two structural factors determine whether injected bias persists:
+     - Isolation: how few competing constraints (loop, visual, IMU) surround affected nodes
+     - Dominance: whether LiDAR constraints dominate over competing constraints
+   Combined score = 0.35·reach + 0.25·isolation + 0.25·dominance + 0.15·bivul_gate
+   (bivul_gate is binary: if 0, score drops to 0, acting as a feasibility gate)
 
 Usage:
     python3 select_spoofer_bi_bo.py \
@@ -80,16 +80,20 @@ def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
         return _graph_cache[cache_key]
 
     t0 = time.time()
+
     dump_files = sorted(
         glob.glob(os.path.join(dump_dir, "dump_*.json")),
         key=lambda p: int(re.search(r'dump_(\d+)\.json', p).group(1)),
     )
 
-    # Use the LAST dump as the canonical node list (full graph)
     if not dump_files:
         _graph_cache[cache_key] = None
         return None
 
+    # FIX: Use the LAST dump which contains the FULL cumulative graph.
+    # After the C++ hook fix, each dump uses isam->getFactorsUnsafe() which returns
+    # the complete accumulated graph (all odometry + loop closure + GPS factors).
+    # No need to merge across dumps — the last dump has everything.
     last_path = dump_files[-1]
     with open(last_path) as fh:
         last_d = json.load(fh)
@@ -107,23 +111,20 @@ def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
     factor_source: List[str] = []
     factor_info: List[float] = []
 
-    for dp in dump_files:
-        with open(dp) as fh:
-            d = json.load(fh)
-        for fac in d.get("factors", []):
-            keys = []
-            for k in fac.get("keys", []):
-                m = re.search(r'X(\d+)', k)
-                if m:
-                    keys.append(int(m.group(1)))
-            if not keys:
-                continue
-            src = fac.get("source", "other")
-            noise = fac.get("noise", [])
-            info = sum(1.0 / max(float(s), 1e-12) for s in noise) if noise else 0.0
-            factor_nids.append(set(keys))
-            factor_source.append(src)
-            factor_info.append(info)
+    for fac in last_d.get("factors", []):
+        keys = []
+        for k in fac.get("keys", []):
+            m = re.search(r'X(\d+)', k)
+            if m:
+                keys.append(int(m.group(1)))
+        if not keys:
+            continue
+        src = fac.get("source", "other")
+        noise = fac.get("noise", [])
+        info = sum(1.0 / max(float(s), 1e-12) for s in noise) if noise else 0.0
+        factor_nids.append(set(keys))
+        factor_source.append(src)
+        factor_info.append(info)
 
     result = dict(
         node_arr=node_arr,
@@ -133,9 +134,13 @@ def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
         factor_info=factor_info,
     )
     _graph_cache[cache_key] = result
-    print(f"[GraphCache] loaded {len(dump_files)} dumps, "
+
+    # Print factor type breakdown for debugging
+    from collections import Counter
+    src_counts = Counter(factor_source)
+    print(f"[GraphCache] loaded last dump ({len(dump_files)} total available), "
           f"{len(node_nids)} nodes, {len(factor_nids)} factors "
-          f"in {time.time()-t0:.1f}s", file=sys.stderr)
+          f"({dict(src_counts)}) in {time.time()-t0:.1f}s", file=sys.stderr)
     return result
 
 
@@ -211,15 +216,13 @@ def compute_bivul_gate(
     half_angle: float = SPOOFING_HALF_RANGE,
 ) -> float:
     """
-    Bi-Vul direction gate: confirms that at least one direction from S to a
-    triggered frame is actually vulnerable (not just geometrically reachable).
+    Bi-Vul direction score: for the spoofer position S = (sx, sy), sample the
+    72-dim directional vulnerability vector of each reachable frame along the
+    S -> frame direction, and return the best normalized score in [0, 1].
 
-    This is the only place bi_vul participates in the new scoring formula:
-    as a binary feasibility check (gate), NOT as a fine-grained score. The
-    "how vulnerable" question is answered by isolation × dominance.
-
-    Returns 1.0 if any triggered frame has mean(bi_vul in attack window) > threshold,
-    else 0.0 (eliminates the candidate).
+    The score is used as a continuous quality factor in the weighted scoring
+    formula. Higher values mean the spoofer faces a more vulnerable direction
+    toward at least one triggered frame.
     """
     sigma = float(distance_threshold) / 3.0 if distance_threshold > 0 else 1.0
     n_buckets = float(N_BUCKETS)
@@ -251,7 +254,7 @@ def compute_bivul_gate(
             normalized = min(mean_vul / 50.0, 1.0)
             best_gate = max(best_gate, normalized)
 
-    return 1.0 if best_gate >= gate_threshold else 0.0
+    return best_gate
 
 
 def compute_isolation(
@@ -399,17 +402,22 @@ def new_score_formula(
     bivul_gate_threshold: float = 0.15,
 ) -> Dict[str, Any]:
     """
-    New 4-factor scoring formula for spoofer position S = (sx, sy):
+    4-factor scoring formula for spoofer position S = (sx, sy):
 
-        score(S) = reach(S) × isolation(S) × dominance(S) × bivul_gate(S)
+        score(S) = 0.35·reach(S) + 0.25·isolation(S) +
+                   0.25·dominance(S) + 0.15·bivul_gate(S)
+
+    bivul_gate is the continuous normalized vulnerability direction score
+    in [0, 1], NOT a binary gate. It contributes as a quality factor:
+    higher values mean the spoofer sits in a more vulnerable direction.
+    The gate_threshold parameter is retained for API compatibility but is
+    no longer used as a hard cutoff.
 
     where:
       - reach(S)       : geometric reachability (how many frames are in range)
       - isolation(S)   : structural isolation of affected nodes in factor graph
       - dominance(S)   : LiDAR constraint dominance over competing constraints
-      - bivul_gate(S)  : binary feasibility gate (1 if direction vulnerable, else 0)
-
-    Returns dict with per-component scores and the combined score.
+      - bivul_gate(S)  : continuous vulnerability direction score in [0, 1]
     """
     reach = compute_reach(sx, sy, frames, distance_threshold)
     bivul = compute_bivul_gate(sx, sy, frames, distance_threshold, bivul_gate_threshold)
@@ -694,8 +702,13 @@ def cma_optimize(
     graph_dump_dir: Optional[str] = None,
 ) -> Tuple[float, float, float, List[Dict]]:
     """
-    CMA-ES optimization using the new formula:
-        score(S) = reach(S) × isolation(S) × dominance(S) × bivul_gate(S)
+    CMA-ES optimization using the 4-factor formula:
+
+        score(S) = 0.35·reach(S) + 0.25·isolation(S) +
+                   0.25·dominance(S) + 0.15·bivul_gate(S)
+
+    bivul_gate is the continuous normalized vulnerability direction score in
+    [0, 1], used as a quality factor in the weighted sum (not a binary gate).
     """
     if not HAS_CMA:
         raise ImportError("cma is required. Install with: pip install cma")
@@ -770,7 +783,7 @@ def cma_optimize(
                 best_x, best_y = x[0], x[1]
             history.append({'sx': float(x[0]), 'sy': float(x[1]), 'score': float(sc)})
 
-        if best_score > 5000:
+        if best_score > 0.995:
             es.stop()
         if es.result.evaluations >= n_calls:
             break
@@ -844,24 +857,32 @@ def visualize(
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
 
-    # ---- Plot 2: BO convergence ----
+    # ---- Plot 2: CMA-ES convergence ----
     ax = axes[1]
-    scores = [h['score'] for h in bo_history]
-    ax.plot(scores, 'b-', lw=1.5)
-    ax.scatter(range(len(scores)), scores, c='steelblue', s=20)
-    if bo_history:
-        ax.axhline(max(scores), color='lime', ls='--', lw=1.0,
-                   label=f'Best: {max(scores):.0f}')
-    ax.set_xlabel('BO Evaluation #')
+    raw_scores = [h['score'] for h in bo_history]
+    real_scores = [s for s in raw_scores if s > -1e15]
+    real_indices = [i for i, s in enumerate(raw_scores) if s > -1e15]
+
+    if real_scores:
+        ax.scatter(real_indices, real_scores, c='steelblue', s=20, zorder=5)
+        ax.plot(real_indices, real_scores, 'b-', lw=1.0, alpha=0.5)
+        running_best = np.maximum.accumulate(real_scores)
+        ax.plot(real_indices, running_best, 'lime', lw=2.0, zorder=6,
+                label=f'Best so far: {running_best[-1]:.4f}')
+        ax.legend(loc='lower right', fontsize=9)
+    else:
+        ax.set_ylim(0, 1)
+
+    n_invalid = len(raw_scores) - len(real_scores)
+    ax.set_xlabel('CMA-ES Evaluation #')
     ax.set_ylabel('Score')
-    ax.set_title('Bayesian Optimization Convergence')
-    ax.legend()
+    ax.set_title(f'CMA-ES Convergence  ({n_invalid} invalid/penalized)')
     ax.grid(True, alpha=0.3)
 
     # ---- Plot 3: Score heatmap around BO best (new formula) ----
     ax = axes[2]
     sx0, sy0 = best_pos
-    extent = 60.0
+    extent = float(max_traj_dist)
     nx, ny = 40, 40
     xs_h = np.linspace(sx0 - extent, sx0 + extent, nx)
     ys_h = np.linspace(sy0 - extent, sy0 + extent, ny)
@@ -885,7 +906,7 @@ def visualize(
 
     im = ax.imshow(Z, extent=[xs_h[0], xs_h[-1], ys_h[0], ys_h[-1]],
                    origin='lower', cmap='hot', aspect='equal')
-    plt.colorbar(im, ax=ax, label='Score (reach×isolation×dominance×bivul)')
+    plt.colorbar(im, ax=ax, label='Score (weighted sum)')
     ax.scatter(sx0, sy0, c='lime', s=200, marker='*', edgecolors='white',
                linewidths=1.5, zorder=15, label='CMA-ES Best')
     ax.plot(traj_pts[:, 0], traj_pts[:, 1], 'b-', lw=0.8, alpha=0.5)
@@ -1041,10 +1062,11 @@ def run_pipeline(args) -> Dict[str, Any]:
     )
     print(f"  Generated {len(candidates)} initial candidates", file=sys.stderr)
 
-    x_min = float(traj_pts[:, 0].min()) - 50.0
-    x_max = float(traj_pts[:, 0].max()) + 50.0
-    y_min = float(traj_pts[:, 1].min()) - 50.0
-    y_max = float(traj_pts[:, 1].max()) + 50.0
+    pad = float(args.max_traj_dist)
+    x_min = float(traj_pts[:, 0].min()) - pad
+    x_max = float(traj_pts[:, 0].max()) + pad
+    y_min = float(traj_pts[:, 1].min()) - pad
+    y_max = float(traj_pts[:, 1].max()) + pad
     x_bounds = (x_min, x_max)
     y_bounds = (y_min, y_max)
 
@@ -1171,13 +1193,17 @@ def main():
     result = run_pipeline(args)
 
     print(f"\n{'='*60}", file=sys.stderr)
-    print(f"=== Bi-SMVS BO Result (with Graph Betweenness) ===", file=sys.stderr)
+    print(f"=== Bi-SMVS CMA-ES Result ===", file=sys.stderr)
     print(f"  Position: ({result['optim']['spoofer_x']:.2f}, {result['optim']['spoofer_y']:.2f})", file=sys.stderr)
     print(f"  Score:    {result['optim']['score']:.2f}", file=sys.stderr)
     print(f"  Min dist: {result['optim']['min_traj_dist']:.2f}m", file=sys.stderr)
     print(f"  In band:  {result['optim']['in_band']}", file=sys.stderr)
-    bc = result.get('betweenness', {})
-    print(f"  BC stats: min={bc.get('min', 0):.4f} max={bc.get('max', 0):.4f} mean={bc.get('mean', 0):.4f}", file=sys.stderr)
+
+    sc = result.get('score_components', {})
+    print(f"  Reach:    {sc.get('reach', 0):.4f}", file=sys.stderr)
+    print(f"  Isolation:{sc.get('isolation', 0):.4f}", file=sys.stderr)
+    print(f"  Dominance:{sc.get('dominance', 0):.4f}", file=sys.stderr)
+    print(f"  Bi-Vul:   {sc.get('bivul_gate', 0):.4f}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 
     if args.output:
