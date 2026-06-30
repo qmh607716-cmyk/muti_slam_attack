@@ -21,8 +21,8 @@ csv_path = Path(args.out)
 def _detect_topic(bag_path):
     topics_found = set()
     with rosbag.Bag(str(bag_path), "r") as bag:
-        for conn, _, _ in bag.read_messages():
-            topics_found.add(conn.topic)
+        for topic, _, _ in bag.read_messages():
+            topics_found.add(topic)
 
     candidates = [
         "/lvi_sam/lidar/mapping/odometry",
@@ -45,7 +45,7 @@ else:
 rows = []
 
 with rosbag.Bag(str(bag_path), "r") as bag:
-    for tp, msg, t in bag.read_messages(topics=[topic]):
+    for _, msg, t in bag.read_messages(topics=[topic]):
         stamp = msg.header.stamp.to_sec()
         if stamp == 0:
             stamp = t.to_sec()
