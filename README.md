@@ -155,15 +155,28 @@ python3 ~/catkin_ws/src/slamspoof/scripts/select_spoofer_bi_bo.py \
 **评分公式**：
 
 ```
-score(S) = 0.35 · reach(S) + 0.25 · isolation(S) + 0.25 · dominance(S) + 0.15 · bivul(S)
+score(S) = opportunity(S) + α × structural(S)
+
+opportunity(S) = reach(S) × bivul_gate(S)
+  reach(S)      : 15m范围内帧的Gaussian加权和 [0,1]
+  bivul_gate(S) : 72维脆弱向量的方向匹配程度 [0,1]
+
+structural(S) = structural_blended(S) × coverage(S)
+  structural_blended(S) = √(structural_bc(S) × lidar_dominance(S))
+    structural_bc(S)    : betweenness介数中心性（越高越在图咽喉上）
+    lidar_dominance(S) : LiDAR约束强度（边长大+yaw变化大→越弱）
+  coverage(S)          : sigmoid(受影响帧数/5)
+
+α = 0.3
 ```
 
 | 因子 | 含义 |
 |------|------|
 | `reach` | 攻击范围内可到达的轨迹点数比例 |
-| `isolation` | 定位图中受影响节点的隔离程度（loop closure 越少越容易被攻击） |
-| `dominance` | LiDAR 约束在受影响节点的占比（越高越依赖 LiDAR，越脆弱） |
-| `bivul` | 攻击窗口内的平均双模态脆弱性 |
+| `bivul_gate` | 攻击窗口内的双模态脆弱性（方向匹配） |
+| `structural_bc` | 因子图介数中心性（咽喉程度） |
+| `lidar_dominance` | LiDAR约束弱（边长大、急弯） |
+| `coverage` | 攻击覆盖范围（受影响帧数） |
 
 输出中的 `bo_x` 和 `bo_y` 即最优 Spoofer 世界坐标，填入阶段 4 配置。
 

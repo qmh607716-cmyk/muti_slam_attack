@@ -23,12 +23,16 @@ Improvements over select_spoofer_continuous_opt.py:
    with CMA-ES evolution strategy. CMA-ES is ideal for sparse, multi-modal
    scoring landscapes where GP-based BO fails completely. ~200 evals in < 1 minute.
 
-4. STRUCTURAL ISOLATION + DOMINANCE (attack persistence)
-   After reachability, two structural factors determine whether injected bias persists:
-     - Isolation: how few competing constraints (loop, visual, IMU) surround affected nodes
-     - Dominance: whether LiDAR constraints dominate over competing constraints
-   Combined score = 0.35·reach + 0.25·isolation + 0.25·dominance + 0.15·bivul_gate
-   (bivul_gate is binary: if 0, score drops to 0, acting as a feasibility gate)
+3. GRAPH-AWARE SCORING (LIO-SAM proxy model):
+   LIO-SAM factor graph is a pure CHAIN (prior → X0 ─ X1 ─ X2 ─ ...).
+   Each node has exactly 2 edges. The LiDAR-IMU coupling strength at each
+   edge is characterised by edge length and yaw change:
+     - Large edge (sparse env) → LiDAR constraint is weak → attack easier
+     - Large yaw change → IMU dominates → LiDAR constraint relatively weaker
+   Combined into: lidar_dominance(S) = normalized_edge_length × normalized_yaw_change
+   Combined with: graph_coverage(S) = affected_nodes / total_nodes
+   Final: score = opportunity(S) × persistence(S)
+   (multiplicative: both must be high for success)
 
 Usage:
     python3 select_spoofer_bi_bo.py \
@@ -64,14 +68,30 @@ _graph_cache: Dict[str, Any] = {}
 
 
 def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
-    """Load all graph dumps ONCE and return compact lookup structures.
+    """
+    Load ALL graph dumps and merge into a single cumulative factor graph.
+
+    LIO-SAM and LVI-SAM dump ONE factor per dump file (the new odometry factor
+    added at the current keyframe). The last dump only contains 1 factor (the most
+    recent odometry edge), so we MUST merge all dumps to reconstruct the full graph.
+
+    For LIO-SAM:
+      - Each dump has N nodes (all cumulative) and 1 factor (current odometry).
+      - Merged graph: N nodes + N factors (1 prior + N-1 odometry).
 
     Returns a dict with:
       - node_arr : (N, 3)  [node_id, x, y]
       - node_nid : (N,)    node IDs
+      - node_quat : (N, 4) [qx, qy, qz, qw]
       - factor_nids : list of sets, one per factor, containing node IDs
-      - factor_source : list of "odometry"|"loop_closure"|"prior"|"other"
+      - factor_source : list of "prior"|"odometry"
       - factor_info  : list of float (info weight = sum(1/noise_i))
+      - factor_noise : list of noise arrays for debugging
+      - chain_edges : list of (nid_a, nid_b, edge_length, angle_change_rad)
+                      Only odometry edges with consecutive node IDs (LIO-SAM chain).
+      - chain_edge_lengths : (N-1,) array of edge lengths
+      - chain_angles : (N-1,) array of yaw angle changes between consecutive nodes
+      - graph_stats : dict of statistics about the merged graph
     """
     import time
 
@@ -90,28 +110,107 @@ def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
         _graph_cache[cache_key] = None
         return None
 
-    # FIX: Use the LAST dump which contains the FULL cumulative graph.
-    # After the C++ hook fix, each dump uses isam->getFactorsUnsafe() which returns
-    # the complete accumulated graph (all odometry + loop closure + GPS factors).
-    # No need to merge across dumps — the last dump has everything.
-    last_path = dump_files[-1]
-    with open(last_path) as fh:
-        last_d = json.load(fh)
+    # ── Merge ALL dumps to reconstruct the full factor graph ──────────────────
+    # NOTE: All fidx values are 0, so we deduplicate by (keys + source) tuple.
+    seen_factors: set = set()
+    all_nodes: Dict[int, dict] = {}
+    all_factors: List[dict] = []
 
-    nodes = last_d.get("nodes", [])
-    node_nids = np.array([int(n["id"]) for n in nodes], dtype=np.int32)
-    node_arr = np.stack([node_nids.astype(float),
-                          np.array([n.get("x", 0.0) for n in nodes]),
-                          np.array([n.get("y", 0.0) for n in nodes])], axis=1)
+    for path in dump_files:
+        with open(path) as fh:
+            d = json.load(fh)
 
-    # factor_nids[i] = set of node IDs involved in factor i
-    # factor_source[i] = source string
-    # factor_info[i]  = information weight
+        for node in d.get("nodes", []):
+            nid = int(node["id"])
+            all_nodes[nid] = node
+
+        for fac in d.get("factors", []):
+            keys = tuple(sorted(fac.get("keys", [])))
+            src = fac.get("source", "unknown")
+            key_sig = (keys, src)
+            if key_sig not in seen_factors:
+                seen_factors.add(key_sig)
+                all_factors.append(fac)
+
+    node_nids = np.array(sorted(all_nodes.keys()), dtype=np.int32)
+
+    # ── GPS coordinate alignment ───────────────────────────────────────────────────
+    # The ISAM2-optimized coordinates in graph dumps don't match the SMVS/GPS
+    # coordinate system. We align via time-based matching:
+    #   node ID → bag timestamp → GPS trajectory position
+    #
+    # Detection: look for *_gps.csv in the sibling "original/" directory
+    gps_x_aligned: Optional[np.ndarray] = None
+    gps_y_aligned: Optional[np.ndarray] = None
+
+    _gd_parent = os.path.dirname(dump_dir.rstrip(os.sep))  # e.g. .../slamspoof_handheld
+    _original_dir = os.path.join(_gd_parent, "original")
+
+    _gps_files = []
+    if os.path.isdir(_original_dir):
+        _gps_files = sorted([
+            os.path.join(_original_dir, f)
+            for f in os.listdir(_original_dir)
+            if "_gps" in f.lower() and f.endswith(".csv")
+        ])
+
+    for _gps_path in _gps_files:
+        if os.path.isfile(_gps_path):
+            try:
+                _gps_df = pd.read_csv(_gps_path)
+                _gps_df.columns = _gps_df.columns.str.strip()
+                _gps_df = _gps_df.dropna()
+                _gps_t = _gps_df["time"].values.astype(np.float64)
+                _gps_x = _gps_df["x"].values.astype(np.float64)
+                _gps_y = _gps_df["y"].values.astype(np.float64)
+                # Map node IDs to GPS positions via linear time interpolation
+                n_total = max(int(node_nids.max()) + 1, 1)
+                n_gps = len(_gps_t)
+                # Estimate bag duration
+                bag_duration = float(_gps_t[-1]) if len(_gps_t) > 1 else float(n_total)
+                node_times = np.arange(n_total, dtype=np.float64) * bag_duration / max(n_total - 1, 1)
+                # Clamp to GPS range
+                node_times = np.clip(node_times, _gps_t.min(), _gps_t.max())
+                gps_x_aligned = np.interp(node_times, _gps_t, _gps_x)
+                gps_y_aligned = np.interp(node_times, _gps_t, _gps_y)
+                # Build map: node_id → gps_index
+                gps_x_for_nids = np.array([gps_x_aligned[int(n)] if int(n) < len(gps_x_aligned) else 0.0 for n in node_nids], dtype=np.float64)
+                gps_y_for_nids = np.array([gps_y_aligned[int(n)] if int(n) < len(gps_y_aligned) else 0.0 for n in node_nids], dtype=np.float64)
+                node_arr = np.stack([
+                    node_nids.astype(float),
+                    gps_x_for_nids,
+                    gps_y_for_nids,
+                ], axis=1)
+                node_quat = np.stack([
+                    np.array([all_nodes[n].get("qx", 0.0) for n in node_nids], dtype=np.float64),
+                    np.array([all_nodes[n].get("qy", 0.0) for n in node_nids], dtype=np.float64),
+                    np.array([all_nodes[n].get("qz", 0.0) for n in node_nids], dtype=np.float64),
+                    np.array([all_nodes[n].get("qw", 1.0) for n in node_nids], dtype=np.float64),
+                ], axis=1)
+                break
+            except Exception:
+                pass
+
+    # Fallback: use raw ISAM2 coordinates if GPS not found
+    if gps_x_aligned is None:
+        node_arr = np.stack([
+            node_nids.astype(float),
+            np.array([all_nodes[n].get("x", 0.0) for n in node_nids], dtype=np.float64),
+            np.array([all_nodes[n].get("y", 0.0) for n in node_nids], dtype=np.float64),
+        ], axis=1)
+        node_quat = np.stack([
+            np.array([all_nodes[n].get("qx", 0.0) for n in node_nids], dtype=np.float64),
+            np.array([all_nodes[n].get("qy", 0.0) for n in node_nids], dtype=np.float64),
+            np.array([all_nodes[n].get("qz", 0.0) for n in node_nids], dtype=np.float64),
+            np.array([all_nodes[n].get("qw", 1.0) for n in node_nids], dtype=np.float64),
+        ], axis=1)
+
     factor_nids: List[set] = []
     factor_source: List[str] = []
     factor_info: List[float] = []
+    factor_noise: List[List[float]] = []
 
-    for fac in last_d.get("factors", []):
+    for fac in all_factors:
         keys = []
         for k in fac.get("keys", []):
             m = re.search(r'X(\d+)', k)
@@ -125,22 +224,174 @@ def _precompute_graph_data(dump_dir: str) -> Dict[str, Any]:
         factor_nids.append(set(keys))
         factor_source.append(src)
         factor_info.append(info)
+        factor_noise.append([float(s) for s in noise] if noise else [])
+
+    # ── Precompute chain metrics for LIO-SAM ──────────────────────────────────
+    # LIO-SAM has a pure chain: consecutive node IDs are connected by odometry edges.
+    # We extract edge lengths and yaw angle changes to characterise the
+    # LiDAR-IMU coupling strength at each segment.
+    chain_edges: List[Tuple] = []
+    chain_edge_lengths: List[float] = []
+    chain_angles: List[float] = []
+
+    def _quat_to_yaw(qx, qy, qz, qw):
+        """Yaw from quaternion (ROS REP-103 convention)."""
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    # Sort nodes by ID to follow chain order
+    node_quat_by_id = {nid: node_quat[i] for i, nid in enumerate(node_nids)}
+    node_pos_by_id = {nid: node_arr[i] for i, nid in enumerate(node_nids)}
+
+    for i in range(len(node_nids) - 1):
+        nid_a = int(node_nids[i])
+        nid_b = int(node_nids[i + 1])
+        # Check if this is a consecutive chain edge
+        if abs(nid_b - nid_a) == 1:
+            pa = node_pos_by_id[nid_a]
+            pb = node_pos_by_id[nid_b]
+            dx = pb[1] - pa[1]
+            dy = pb[2] - pa[2]
+            edge_len = math.sqrt(dx * dx + dy * dy)
+
+            ya = _quat_to_yaw(*node_quat_by_id[nid_a])
+            yb = _quat_to_yaw(*node_quat_by_id[nid_b])
+            d_yaw = ((yb - ya + math.pi) % (2.0 * math.pi)) - math.pi
+            # Magnitude of angular change
+            angle_change = abs(d_yaw)
+
+            chain_edges.append((nid_a, nid_b, edge_len, angle_change))
+            chain_edge_lengths.append(edge_len)
+            chain_angles.append(angle_change)
+
+    chain_edge_lengths_arr = np.array(chain_edge_lengths, dtype=np.float64)
+    chain_angles_arr = np.array(chain_angles, dtype=np.float64)
+
+    # ── Compute betweenness centrality (Brandes algorithm) ───────────────────────
+    # Betweenness: fraction of shortest paths passing through each node.
+    # High betweenness = node is an "information bottleneck" = attack amplification.
+    # This is the CORE shared metric across LIO-SAM and LVI-SAM.
+    from collections import defaultdict
+
+    adj: Dict[int, List[int]] = defaultdict(list)
+    for f_nids in factor_nids:
+        nid_list = list(f_nids)
+        if len(nid_list) == 2:
+            adj[nid_list[0]].append(nid_list[1])
+            adj[nid_list[1]].append(nid_list[0])
+
+    all_graph_nodes = sorted(adj.keys())
+    n_graph = len(all_graph_nodes)
+
+    bc: Dict[int, float] = {n: 0.0 for n in all_graph_nodes}
+    for s in all_graph_nodes:
+        S: List[int] = []
+        P: Dict[int, List[int]] = {v: [] for v in all_graph_nodes}
+        sigma: Dict[int, float] = {v: 0.0 for v in all_graph_nodes}
+        sigma[s] = 1.0
+        d: Dict[int, int] = {v: -1 for v in all_graph_nodes}
+        d[s] = 0
+        Q: List[int] = [s]
+        while Q:
+            v = Q.pop(0)
+            S.append(v)
+            for w in adj[v]:
+                if d[w] < 0:
+                    d[w] = d[v] + 1
+                    Q.append(w)
+                if d[w] == d[v] + 1:
+                    sigma[w] += sigma[v]
+                    P[w].append(v)
+        delta: Dict[int, float] = {v: 0.0 for v in all_graph_nodes}
+        while S:
+            w = S.pop()
+            for v in P[w]:
+                delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
+            if w != s:
+                bc[w] += delta[w]
+    if n_graph > 2:
+        scale = 1.0 / ((n_graph - 1) * (n_graph - 2))
+        for v in bc:
+            bc[v] *= scale
+
+    # ── Compute per-node stiffness and degree ───────────────────────────────────
+    # Stiffness: sum of factor_info at each node (information weight)
+    # Degree: number of factors touching each node
+    node_stiffness: Dict[int, float] = defaultdict(float)
+    node_degree: Dict[int, int] = defaultdict(int)
+    for f_idx, f_nids in enumerate(factor_nids):
+        fi = factor_info[f_idx]
+        for nid in f_nids:
+            node_stiffness[nid] += fi
+            node_degree[nid] += 1
+
+    # Align all per-node arrays with node_nids order
+    # Use log1p(stiffness) to compress extreme values from info=1/noise
+    bc_arr = np.array([float(bc.get(int(nid), 0.0)) for nid in node_nids], dtype=np.float64)
+    stiffness_arr = np.array(
+        [math.log1p(node_stiffness.get(int(nid), 0.0)) for nid in node_nids],
+        dtype=np.float64
+    )
+    degree_arr = np.array([float(node_degree.get(int(nid), 0)) for nid in node_nids], dtype=np.float64)
 
     result = dict(
         node_arr=node_arr,
         node_nids=node_nids,
+        node_quat=node_quat,
         factor_nids=factor_nids,
         factor_source=factor_source,
         factor_info=factor_info,
+        factor_noise=factor_noise,
+        chain_edges=chain_edges,
+        chain_edge_lengths=chain_edge_lengths_arr,
+        chain_angles=chain_angles_arr,
+        node_betweenness=bc_arr,
+        node_stiffness=stiffness_arr,
+        node_degree=degree_arr,
     )
     _graph_cache[cache_key] = result
 
-    # Print factor type breakdown for debugging
+    # ── Print graph statistics ───────────────────────────────────────────────
     from collections import Counter
     src_counts = Counter(factor_source)
-    print(f"[GraphCache] loaded last dump ({len(dump_files)} total available), "
+    # Node connectivity: how many factors touch each node?
+    node_factor_count = {nid: 0 for nid in node_nids}
+    for f_nids in factor_nids:
+        for nid in f_nids:
+            node_factor_count[nid] = node_factor_count.get(nid, 0) + 1
+
+    avg_connectivity = sum(node_factor_count.values()) / max(len(node_factor_count), 1)
+    max_connectivity = max(node_factor_count.values()) if node_factor_count else 0
+
+    print(f"[GraphCache] merged {len(dump_files)} dumps, "
           f"{len(node_nids)} nodes, {len(factor_nids)} factors "
-          f"({dict(src_counts)}) in {time.time()-t0:.1f}s", file=sys.stderr)
+          f"({dict(src_counts)})", file=sys.stderr)
+    print(f"[GraphCache] node connectivity: avg={avg_connectivity:.2f}, max={max_connectivity}",
+          file=sys.stderr)
+
+    if len(chain_edge_lengths_arr) > 0:
+        print(f"[GraphCache] chain edges: {len(chain_edge_lengths_arr)}, "
+              f"edge_len mean={chain_edge_lengths_arr.mean():.2f}m "
+              f"std={chain_edge_lengths_arr.std():.2f}m "
+              f"[{chain_edge_lengths_arr.min():.2f}, {chain_edge_lengths_arr.max():.2f}]m",
+              file=sys.stderr)
+        print(f"[GraphCache] yaw change: mean={chain_angles_arr.mean():.3f}rad "
+              f"std={chain_angles_arr.std():.3f}rad",
+              file=sys.stderr)
+
+    print(f"[GraphCache] betweenness: max={bc_arr.max():.4f}, "
+          f"mean={bc_arr.mean():.4f}, nodes_with_0={int((bc_arr == 0).sum())}",
+          file=sys.stderr)
+    print(f"[GraphCache] stiffness(log1p): max={stiffness_arr.max():.2f}, "
+          f"mean={stiffness_arr.mean():.2f}",
+          file=sys.stderr)
+    print(f"[GraphCache] degree: max={int(degree_arr.max())}, "
+          f"mean={degree_arr.mean():.2f}, "
+          f"deg4_nodes={int((degree_arr >= 4).sum())}",
+          file=sys.stderr)
+
+    print(f"[GraphCache] loaded in {time.time()-t0:.1f}s", file=sys.stderr)
     return result
 
 
@@ -257,91 +508,80 @@ def compute_bivul_gate(
     return best_gate
 
 
-def compute_isolation(
+# ============================================================================
+# Stage 1: New Scoring Functions — LIO-SAM Graph-Aware Design
+# ============================================================================
+#
+# Design rationale (LIO-SAM as proxy for LVI-SAM):
+#
+# LIO-SAM factor graph is a CHAIN:
+#   prior → X0 ──odometry── X1 ──odometry── X2 ── ... ── X5751
+#   Each node has exactly 2 edges (prior + one odometry, except endpoints).
+#   No loop closure, no GPS, no visual factors.
+#
+# KEY INSIGHT: In LIO-SAM, the LiDAR-IMU coupling determines attack success.
+# Each odometry edge = [LiDAR scan-matching] + [IMU preintegration] → combined constraint.
+# The SLAM optimiser balances both to estimate robot motion.
+#
+# When edge length is LARGE (sparse environment, P10=0.6m, P90=286m):
+#   → LiDAR must match scans over a large distance → scan-matching is harder/looser
+#   → Optimiser trusts IMU preintegration more → LiDAR constraint is "weaker"
+#   → ATTACK EASIER: injecting fake LiDAR points pushes the pose in the attack direction
+#
+# When edge length is SMALL (dense environment):
+#   → LiDAR finds tight correspondences → scan-matching dominates
+#   → LiDAR constraint is "stronger" → harder to bias the estimate
+#   → ATTACK HARDER
+#
+# Similarly for yaw change: large rotation → IMU preintegration dominates →
+# LiDAR constraint relatively weaker → more vulnerable to attack.
+#
+# NEW SCORING FORMULA:
+#   score(S) = opportunity(S) × persistence(S)
+#
+# where:
+#   opportunity(S) = reach(S) × bivul(S)
+#     → Geometric: can I reach vulnerable frames? (reach)
+#     → Directional: am I in a vulnerable direction? (bivul)
+#
+#   persistence(S) = lidar_dominance(S) × graph_coverage(S)
+#     → Proxy model: how weak is the LiDAR constraint at affected edges? (lidar_dominance)
+#     → Structural: how much of the trajectory is affected? (graph_coverage)
+#
+# This is multiplicative (not additive): if either factor is 0, the score is 0.
+# This is physically correct: you need BOTH a vulnerable direction AND a weak
+# LiDAR constraint for the attack to succeed.
+
+
+def compute_lidar_dominance(
     sx: float, sy: float,
     frames: List['VulFrame'],
-    traj_pts: np.ndarray,
-    graph_dump_dir: Optional[str] = None,
-    distance_threshold: float = 15.0,
-    loop_closure_radius: float = 50.0,
-    loop_time_gap: float = 5.0,
-) -> float:
-    """
-    Structural isolation: how isolated are the affected nodes in the factor graph?
-
-    High isolation -> the attacked region has few competing constraints
-    (few loop closures, visual factors, IMU factors) -> the injected bias
-    persists in the optimization.
-
-    Strategy:
-      1. Find all frames within distance_threshold of S (affected frames).
-      2. Map frames to nearest factor-graph nodes (using pre-cached data).
-      3. Count competing constraint edges (non-odometry) touching each affected node.
-      4. isolation = 1 / (1 + avg_competing_edges_per_node)
-
-    Falls back to a distance-only heuristic when no dump files are available:
-      isolation = 1 - 0.5 * (n_affected / n_total)
-    """
-    affected = []
-    for f in frames:
-        dist = math.hypot(sx - f.x, sy - f.y)
-        if dist < distance_threshold:
-            affected.append((f, dist))
-
-    if not affected:
-        return 0.0
-
-    n_affected = len(affected)
-
-    gdata = _precompute_graph_data(graph_dump_dir) if graph_dump_dir else None
-    if gdata is None:
-        total_frames = len(frames)
-        if total_frames == 0:
-            return 0.0
-        frac = n_affected / total_frames
-        return float(np.clip(1.0 - 0.5 * frac, 0.0, 1.0))
-
-    node_arr = gdata["node_arr"]
-    node_nids = gdata["node_nids"]
-    factor_nids = gdata["factor_nids"]
-    factor_source = gdata["factor_source"]
-
-    affected_nid_set = set()
-    for f, _ in affected:
-        dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
-        nearest_idx = int(np.argmin(dists))
-        affected_nid_set.add(int(node_nids[nearest_idx]))
-
-    competing_counts: Dict[int, int] = {nid: 0 for nid in affected_nid_set}
-    for f_nids, f_src in zip(factor_nids, factor_source):
-        if f_src == "odometry":
-            continue
-        for nid in f_nids:
-            if nid in competing_counts:
-                competing_counts[nid] += 1
-
-    avg_competing = float(np.mean(list(competing_counts.values()))) if competing_counts else 0.0
-    isolation = 1.0 / (1.0 + avg_competing)
-    return float(np.clip(isolation, 0.0, 1.0))
-
-
-def compute_dominance(
-    sx: float, sy: float,
-    frames: List['VulFrame'],
-    traj_pts: np.ndarray,
-    graph_dump_dir: Optional[str] = None,
+    gdata: Optional[Dict[str, Any]] = None,
     distance_threshold: float = 15.0,
 ) -> float:
     """
-    Constraint dominance: do LiDAR constraints dominate over competing
-    constraints (loop, visual, IMU) at the affected nodes?
+    LiDAR Dominance: how "weak" are the LiDAR constraints at the attack edges?
 
-    dominance(S) = mean over affected nodes of:
-        LiDAR_info / (LiDAR_info + loop_info + visual_info + imu_info + eps)
+    LIO-SAM (LiDAR-IMU tightly coupled):
+      The odometry edge at segment i spans distance d_i and yaw change Δθ_i.
+      The "LiDAR weakness" of this edge is:
+        lidar_weakness_i = (d_i / d_ref) × (Δθ_i / Δθ_ref)
+      where d_ref and Δθ_ref are the medians (robust to outliers).
 
-    where info = sum of 1/noise_i for each dimension (trace of information matrix).
+      A larger edge (sparse environment) → LiDAR has fewer correspondences →
+      optimizer trusts IMU more → LiDAR constraint is relatively weaker →
+      this is GOOD for attack → high lidar_dominance.
 
-    Falls back to 0.5 (neutral) when no dump files are available.
+      We use: lidar_dominance = 1 / (1 + median_edge_length_normalized)
+      Range: (0, 1]. Higher = more vulnerable.
+
+    LVI-SAM (with loop closure / GPS):
+      Falls back to: lidar_dominance = 1 / (1 + avg_loop_count_per_node)
+      More loop closures → stronger overall constraint → lower dominance → harder to attack.
+
+    Fallback (no graph): returns 0.5 (neutral).
+
+    NOTE: caller passes gdata directly to avoid repeated loading in CMA-ES hot loop.
     """
     affected = []
     for f in frames:
@@ -352,45 +592,265 @@ def compute_dominance(
     if not affected:
         return 0.0
 
-    gdata = _precompute_graph_data(graph_dump_dir) if graph_dump_dir else None
     if gdata is None:
         return 0.5
 
     node_arr = gdata["node_arr"]
     node_nids = gdata["node_nids"]
-    factor_nids = gdata["factor_nids"]
     factor_source = gdata["factor_source"]
-    factor_info = gdata["factor_info"]
+    chain_edge_lengths = gdata.get("chain_edge_lengths")
+    chain_angles = gdata.get("chain_angles")
 
+    has_loop_closure = any(s == "loop_closure" for s in factor_source)
+
+    if has_loop_closure:
+        # LVI-SAM: dominance from loop closure count
+        loop_counts: Dict[int, int] = {nid: 0 for nid in node_nids}
+        for f_nids, f_src in zip(gdata["factor_nids"], gdata["factor_source"]):
+            if f_src == "loop_closure":
+                for nid in f_nids:
+                    if nid in loop_counts:
+                        loop_counts[nid] += 1
+
+        # Map frames to affected nodes
+        affected_nid_set = set()
+        for f in affected:
+            dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
+            nearest_idx = int(np.argmin(dists))
+            affected_nid_set.add(int(node_nids[nearest_idx]))
+
+        if not affected_nid_set:
+            return 0.0
+
+        counts = [loop_counts.get(nid, 0) for nid in affected_nid_set]
+        avg_loop = float(np.mean(counts)) if counts else 0.0
+        return float(np.clip(1.0 / (1.0 + avg_loop), 0.0, 1.0))
+
+    else:
+        # LIO-SAM: dominance from edge length / yaw change
+        if chain_edge_lengths is None or len(chain_edge_lengths) == 0:
+            return 0.5
+
+        # Find the nearest chain edge for each affected frame
+        # Build map: node_id → edge index (for consecutive edges)
+        # Edge i connects node_nids[i] → node_nids[i+1]
+        nid_to_idx = {int(nid): i for i, nid in enumerate(node_nids)}
+
+        affected_edge_lengths = []
+        affected_yaw_changes = []
+        for f in affected:
+            dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
+            nearest_idx = int(np.argmin(dists))
+            nid = int(node_nids[nearest_idx])
+
+            # Find the edge that this frame's pose "belongs" to
+            # The pose is estimated relative to adjacent nodes
+            if nid in nid_to_idx:
+                idx = nid_to_idx[nid]
+                # Use both adjacent edges if possible
+                if idx < len(chain_edge_lengths):
+                    affected_edge_lengths.append(chain_edge_lengths[idx])
+                    affected_yaw_changes.append(chain_angles[idx])
+                if idx > 0:
+                    affected_edge_lengths.append(chain_edge_lengths[idx - 1])
+                    affected_yaw_changes.append(chain_angles[idx - 1])
+
+        if not affected_edge_lengths:
+            return 0.5
+
+        el_arr = np.array(affected_edge_lengths, dtype=np.float64)
+        ya_arr = np.array(affected_yaw_changes, dtype=np.float64)
+
+        # Use median of chain as reference (robust to outliers)
+        d_ref = float(np.median(chain_edge_lengths))
+        ya_ref = float(np.median(chain_angles))
+        ya_ref = max(ya_ref, 1e-4)  # avoid div by zero
+
+        # Compute combined weakness score
+        # d_normalized: how much larger is the affected edge vs median
+        d_norm = np.clip(el_arr / d_ref, 0.0, 10.0)
+        # yaw_norm: how much larger is the yaw change vs median
+        ya_norm = np.clip(ya_arr / ya_ref, 0.0, 10.0)
+
+        # Combined: geometric mean of both normalizations
+        combined_norm = np.sqrt(d_norm * ya_norm)
+        # Convert to dominance score: high normalization → high dominance
+        # Using sigmoid-like: dominance = norm / (1 + norm)
+        dominance = combined_norm / (1.0 + combined_norm)
+
+        return float(np.clip(dominance.mean(), 0.0, 1.0))
+
+
+def compute_attack_persistence(
+    sx: float, sy: float,
+    frames: List['VulFrame'],
+    gdata: Optional[Dict[str, Any]] = None,
+    distance_threshold: float = 15.0,
+) -> float:
+    """
+    Attack Persistence: how "stuck" is the bias in the factor graph?
+
+    The key insight from LIO-SAM chain topology:
+      Each node is ONLY connected to its immediate neighbours.
+      Therefore, injected bias at node i ONLY propagates to neighbours i-1 and i+1.
+      The attack's "persistence" = how many keyframes in the affected zone?
+
+    In LIO-SAM chain (pure sequential edges):
+      coverage = |{affected keyframes}| / |{all keyframes}|
+      This is always tiny for localized attacks (e.g. 2 frames / 19901 = 0.01%).
+      We compress via sigmoid so that even small coverage is meaningful:
+        persistence = sigmoid((n_affected - 1) / tau)
+      where tau=5 is a half-life (5 frames → 50% coverage score).
+
+    In LVI-SAM (with loop closure):
+      persistence = average factor density inverse at affected nodes
+      More factors per node → more constraint → bias is absorbed → lower persistence.
+      persistence = 1 / (1 + avg_factor_count_in_zone)
+
+    The "tau" parameter (half-life = 5 frames) means:
+      1 frame → 17% persistence
+      5 frames → 50% persistence
+      10 frames → 73% persistence
+      20 frames → 90% persistence
+    This captures the intuition: even a few affected frames are meaningful.
+
+    NOTE: caller passes gdata directly to avoid repeated loading in CMA-ES hot loop.
+    """
+    affected = []
+    for f in frames:
+        dist = math.hypot(sx - f.x, sy - f.y)
+        if dist < distance_threshold:
+            affected.append(f)
+
+    if not affected:
+        return 0.0
+
+    if gdata is None:
+        # Fallback: fraction of frames in range
+        frac = len(affected) / max(len(frames), 1)
+        # Sigmoid compression: tau=0.05 means 5% coverage → 50%
+        tau = 0.05
+        persistence = frac / (frac + tau)
+        return float(np.clip(persistence, 0.0, 1.0))
+
+    node_arr = gdata["node_arr"]
+    node_nids = gdata["node_nids"]
+    factor_source = gdata["factor_source"]
+
+    has_loop_closure = any(s == "loop_closure" for s in factor_source)
+
+    # Map frames to affected graph nodes
     affected_nid_set = set()
     for f in affected:
         dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
         nearest_idx = int(np.argmin(dists))
         affected_nid_set.add(int(node_nids[nearest_idx]))
 
-    lidar_info: Dict[int, float] = {nid: 0.0 for nid in affected_nid_set}
-    competing_info: Dict[int, float] = {nid: 0.0 for nid in affected_nid_set}
+    if not affected_nid_set:
+        return 0.0
 
-    for f_nids, f_src, f_info in zip(factor_nids, factor_source, factor_info):
-        for nid in f_nids:
-            if nid in lidar_info:
-                lidar_info[nid] += f_info
-                if f_src != "odometry":
-                    competing_info[nid] += f_info
+    if has_loop_closure:
+        # LVI-SAM: persistence from local factor density
+        factor_counts: Dict[int, int] = {nid: 0 for nid in affected_nid_set}
+        for f_nids in gdata["factor_nids"]:
+            for nid in f_nids:
+                if nid in factor_counts:
+                    factor_counts[nid] += 1
 
-    doms = []
-    for nid in affected_nid_set:
-        l_i = lidar_info.get(nid, 0.0)
-        c_i = competing_info.get(nid, 0.0)
-        total = l_i + c_i
-        if total > 1e-12:
-            doms.append(l_i / total)
+        counts = list(factor_counts.values())
+        avg_count = float(np.mean(counts)) if counts else 1.0
+        persistence = 1.0 / (1.0 + avg_count)
+    else:
+        # LIO-SAM: sigmoid-scaled coverage
+        # n_affected keyframes in range. In LIO-SAM chain, each → 1 node.
+        n_affected = len(affected_nid_set)
+        # Sigmoid with half-life at 5 keyframes
+        tau = 5.0
+        persistence = float(n_affected) / (float(n_affected) + tau)
+
+    return float(np.clip(persistence, 0.0, 1.0))
+
+
+def compute_structural_score(
+    sx: float, sy: float,
+    frames: List['VulFrame'],
+    gdata: Optional[Dict[str, Any]] = None,
+    distance_threshold: float = 15.0,
+) -> float:
+    """
+    Structural score: betweenness-based attack amplification factor.
+
+    DESIGN RATIONALE:
+      Betweenness centrality measures how many shortest paths pass through a node.
+      High betweenness nodes are "information bottlenecks" — injecting bias here
+      propagates to many other nodes along many paths.
+
+      The shared metric between LIO-SAM (white-box) and LVI-SAM (black-box):
+        LIO-SAM: real betweenness computed from factor graph edges
+        LVI-SAM: spatial-revisit proxy (nodes frequently revisited spatially
+                 are estimated to have high betweenness in the factor graph)
+
+      For a spoofer at (sx, sy), we find the nearest trajectory frames
+      and compute the average betweenness at those nodes:
+        structural_score = mean(betweenness of affected nodes)
+
+      High betweenness → bias propagates to many nodes → high attack amplification
+      Low betweenness  → bias stays local → limited attack effect
+    """
+    if gdata is None:
+        return 0.0
+
+    node_arr = gdata.get("node_arr")
+    node_betweenness = gdata.get("node_betweenness")
+    node_stiffness = gdata.get("node_stiffness")
+    node_degree = gdata.get("node_degree")
+
+    if node_arr is None or node_betweenness is None:
+        return 0.0
+
+    # Find frames within range
+    affected_bc = []
+    affected_stiff = []
+    for f in frames:
+        dist = math.hypot(sx - f.x, sy - f.y)
+        if dist < distance_threshold:
+            dists = np.hypot(node_arr[:, 1] - f.x, node_arr[:, 2] - f.y)
+            nearest_idx = int(np.argmin(dists))
+            affected_bc.append(node_betweenness[nearest_idx])
+            if node_stiffness is not None:
+                affected_stiff.append(node_stiffness[nearest_idx])
+
+    if not affected_bc:
+        return 0.0
+
+    avg_bc = float(np.mean(affected_bc))
+
+    # Normalize: map [0, max_bc] → [0, 1]
+    # Use observed max across all nodes as reference
+    max_bc = float(node_betweenness.max()) if len(node_betweenness) > 0 else 1.0
+    if max_bc > 0:
+        bc_norm = avg_bc / max_bc
+    else:
+        bc_norm = 0.0
+
+    # Stiffness adjustment: high stiffness → lower score (node is well-constrained)
+    # stiffness is information weight: high = many/strong factors → hard to move
+    # Only apply if we have per-node stiffness data
+    stiffness_score = 1.0
+    if node_stiffness is not None and affected_stiff:
+        avg_stiff = float(np.mean(affected_stiff))
+        max_stiff = float(node_stiffness.max()) if len(node_stiffness) > 0 else 1.0
+        if max_stiff > 0:
+            # Convert to "weakness": 1 - (stiffness / max) → 1 means very weak
+            weakness = 1.0 - min(avg_stiff / max_stiff, 1.0)
+            # Geometric mean of betweenness and weakness
+            stiffness_score = math.sqrt(bc_norm * weakness) if bc_norm > 0 else 0.0
         else:
-            doms.append(0.5)
+            stiffness_score = bc_norm
+    else:
+        stiffness_score = bc_norm
 
-    if doms:
-        return float(np.clip(np.mean(doms), 0.0, 1.0))
-    return 0.5
+    return float(np.clip(stiffness_score, 0.0, 1.0))
 
 
 def new_score_formula(
@@ -398,45 +858,79 @@ def new_score_formula(
     frames: List['VulFrame'],
     traj_pts: np.ndarray,
     distance_threshold: float,
-    graph_dump_dir: Optional[str] = None,
     bivul_gate_threshold: float = 0.15,
+    gdata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    4-factor scoring formula for spoofer position S = (sx, sy):
+    LIO-SAM-aware scoring formula with TWO COMPETING OBJECTIVES:
 
-        score(S) = 0.35·reach(S) + 0.25·isolation(S) +
-                   0.25·dominance(S) + 0.15·bivul_gate(S)
-
-    bivul_gate is the continuous normalized vulnerability direction score
-    in [0, 1], NOT a binary gate. It contributes as a quality factor:
-    higher values mean the spoofer sits in a more vulnerable direction.
-    The gate_threshold parameter is retained for API compatibility but is
-    no longer used as a hard cutoff.
+        score(S) = opportunity(S) + alpha * structural(S)
 
     where:
-      - reach(S)       : geometric reachability (how many frames are in range)
-      - isolation(S)   : structural isolation of affected nodes in factor graph
-      - dominance(S)   : LiDAR constraint dominance over competing constraints
-      - bivul_gate(S)  : continuous vulnerability direction score in [0, 1]
+
+        opportunity(S) = reach(S) × bivul_gate(S)
+          reach(S)       : geometric reachability (Gaussian-weighted, [0,1])
+          bivul_gate(S)  : directional vulnerability score [0, 1]
+
+        structural(S) = structural_score(S) × graph_coverage(S)
+          structural_score(S) : betweenness-based attack amplification [0,1]
+                               LIO-SAM: real betweenness from factor graph
+                               LVI-SAM: spatial-revisit proxy (shared metric)
+                               High betweenness → bias propagates to many nodes
+          graph_coverage(S)  : sigmoid(affected_keyframes / tau)
+
+        alpha = 0.3 (structural factors contribute at most 30% of max score)
+
+    DESIGN RATIONALE:
+      Geographic reach and LiDAR dominance are ANTI-CORRELATED:
+        - Dense regions (small edges): many SMVS frames in range, but strong LiDAR
+          constraints → reach is high, lidar_dominance is low
+        - Sparse regions (large edges): few frames in range, but weak LiDAR constraints
+          → reach is low, lidar_dominance is high
+
+      Betweenness centrality captures a fundamentally different signal:
+        - High betweenness nodes are information bottlenecks in the factor graph
+        - Attacking a high-betweenness node amplifies bias across many trajectories
+        - This is a SHARED metric: both LIO-SAM (white-box) and LVI-SAM (black-box)
+          can use spatial-revisit frequency as a proxy for graph betweenness
+
+      The ADDITIVE form (opportunity + 0.3 * structural) handles this:
+        - Dense region: opportunity ≈ 0.2 * 0.3 = 0.06, structural ≈ 0.8 * 0.29 = 0.02
+          → score ≈ 0.07 + 0.01 = 0.08
+        - Sparse region: opportunity ≈ 0.0 (no frames in range), but if a few frames
+          exist: opportunity > 0, and lidar_dominance boosts the score
+        - Both regions get meaningful scores, ranked by the COMBINATION.
+
+      The multiplicative coupling in opportunity (reach × bivul) still acts as an
+      AND gate: both must be non-zero for opportunity > 0.
+
+      This is fundamentally different from the original additive formula where
+      isolated metrics like isolation and dominance were always ~1.0 and
+      dominated the score by their fixed coefficients.
     """
     reach = compute_reach(sx, sy, frames, distance_threshold)
     bivul = compute_bivul_gate(sx, sy, frames, distance_threshold, bivul_gate_threshold)
-    isolation = compute_isolation(sx, sy, frames, traj_pts, graph_dump_dir, distance_threshold)
-    dominance = compute_dominance(sx, sy, frames, traj_pts, graph_dump_dir, distance_threshold)
+    lidar_dom = compute_lidar_dominance(sx, sy, frames, gdata, distance_threshold)
+    coverage = compute_attack_persistence(sx, sy, frames, gdata, distance_threshold)
+    structural_bc = compute_structural_score(sx, sy, frames, gdata, distance_threshold)
 
-    combined = (
-        0.35 * reach +
-        0.25 * isolation +
-        0.25 * dominance +
-        0.15 * bivul
-    )
+    opportunity = reach * bivul
+    # Blend betweenness-based structural score with lidar_dominance
+    # geometric mean of both → both must be non-trivial for high structural score
+    structural_blended = math.sqrt(structural_bc * lidar_dom) if (structural_bc > 0 and lidar_dom > 0) else 0.0
+    structural = structural_blended * coverage
+    alpha = 0.3
+    score = opportunity + alpha * structural
 
     return {
-        'score': float(combined),
+        'score': float(score),
+        'opportunity': float(opportunity),
+        'structural': float(structural),
         'reach': float(reach),
-        'isolation': float(isolation),
-        'dominance': float(dominance),
         'bivul_gate': float(bivul),
+        'lidar_dominance': float(lidar_dom),
+        'graph_coverage': float(coverage),
+        'structural_bc': float(structural_bc),
     }
 
 
@@ -699,16 +1193,18 @@ def cma_optimize(
     traj_pts: np.ndarray = None,
     distance_threshold: float = 15.0,
     min_traj_dist: float = 5.0,
-    graph_dump_dir: Optional[str] = None,
+    gdata: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, float, float, List[Dict]]:
     """
-    CMA-ES optimization using the 4-factor formula:
+    CMA-ES optimization using the betweenness-aware formula:
 
-        score(S) = 0.35·reach(S) + 0.25·isolation(S) +
-                   0.25·dominance(S) + 0.15·bivul_gate(S)
+        score(S) = opportunity(S) + 0.3 * structural(S)
+        opportunity(S) = reach(S) × bivul_gate(S)
+        structural(S) = structural_bc(S) × graph_coverage(S)
+        structural_bc(S) = betweenness-based attack amplification
 
-    bivul_gate is the continuous normalized vulnerability direction score in
-    [0, 1], used as a quality factor in the weighted sum (not a binary gate).
+    The betweenness component captures graph-theoretic vulnerability:
+    high-betweenness nodes are information bottlenecks that amplify bias.
     """
     if not HAS_CMA:
         raise ImportError("cma is required. Install with: pip install cma")
@@ -724,7 +1220,7 @@ def cma_optimize(
                     continue
             score = new_score_formula(
                 pt[0], pt[1], frames, traj_pts, distance_threshold,
-                graph_dump_dir=graph_dump_dir,
+                gdata=gdata,
             )
             if sc := score['score']:
                 if sc > best_cand_score:
@@ -753,7 +1249,7 @@ def cma_optimize(
 
         new_res = new_score_formula(
             sx, sy, frames, traj_pts, distance_threshold,
-            graph_dump_dir=graph_dump_dir,
+            gdata=gdata,
         )
         return -new_res['score']
 
@@ -800,6 +1296,8 @@ def visualize(
     max_traj_dist: float,
     distance_threshold: float,
     output_path: str,
+    min_traj_dist: float = 5.0,
+    gdata=None,
 ):
     """Generate visualization."""
     try:
@@ -893,13 +1391,13 @@ def visualize(
         for ix in range(nx):
             # min_traj_dist constraint
             d_min = float(np.min(np.hypot(traj_pts[:, 0] - xs_h[ix], traj_pts[:, 1] - ys_h[iy])))
-            if d_min < 5.0:  # min_traj_dist heuristic
+            if d_min < min_traj_dist:
                 Z[iy, ix] = 0.0
             else:
                 try:
                     res = new_score_formula(xs_h[ix], ys_h[iy], frames,
                                             traj_pts, distance_threshold,
-                                            graph_dump_dir=None)
+                                            gdata=gdata)
                     Z[iy, ix] = res['score']
                 except Exception:
                     Z[iy, ix] = 0.0
@@ -1070,6 +1568,9 @@ def run_pipeline(args) -> Dict[str, Any]:
     x_bounds = (x_min, x_max)
     y_bounds = (y_min, y_max)
 
+    # ---- Load graph data (for betweenness + stiffness) ----
+    gdata = _precompute_graph_data(args.graph_dump_dir) if args.graph_dump_dir else None
+
     # ---- CMA-ES Optimization ----
     print(f"\n[CMA-ES] Running optimization...", file=sys.stderr)
     bo_x, bo_y, bo_score, bo_history = cma_optimize(
@@ -1081,15 +1582,15 @@ def run_pipeline(args) -> Dict[str, Any]:
         traj_pts=traj_pts,
         distance_threshold=args.distance_threshold,
         min_traj_dist=args.min_traj_dist,
-        graph_dump_dir=args.graph_dump_dir,
+        gdata=gdata,
     )
 
     score_components = {}
     try:
         score_components = new_score_formula(
             bo_x, bo_y, top_frames, traj_pts, args.distance_threshold,
-            graph_dump_dir=args.graph_dump_dir,
             bivul_gate_threshold=args.bivul_gate_threshold,
+            gdata=gdata,
         )
     except Exception as exc:
         print(f"[WARN] new_score_formula failed on final pos: {exc}", file=sys.stderr)
@@ -1110,6 +1611,8 @@ def run_pipeline(args) -> Dict[str, Any]:
             max_traj_dist=args.max_traj_dist,
             distance_threshold=args.distance_threshold,
             output_path=args.viz_path,
+            min_traj_dist=args.min_traj_dist,
+            gdata=gdata,
         )
 
     output = {
@@ -1200,10 +1703,12 @@ def main():
     print(f"  In band:  {result['optim']['in_band']}", file=sys.stderr)
 
     sc = result.get('score_components', {})
+    print(f"  Opportunity:{sc.get('opportunity', 0):.4f}", file=sys.stderr)
+    print(f"  Structural:{sc.get('structural', 0):.4f}", file=sys.stderr)
     print(f"  Reach:    {sc.get('reach', 0):.4f}", file=sys.stderr)
-    print(f"  Isolation:{sc.get('isolation', 0):.4f}", file=sys.stderr)
-    print(f"  Dominance:{sc.get('dominance', 0):.4f}", file=sys.stderr)
     print(f"  Bi-Vul:   {sc.get('bivul_gate', 0):.4f}", file=sys.stderr)
+    print(f"  LiDAR dom:{sc.get('lidar_dominance', 0):.4f}", file=sys.stderr)
+    print(f"  Coverage:  {sc.get('graph_coverage', 0):.4f}", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
 
     if args.output:
