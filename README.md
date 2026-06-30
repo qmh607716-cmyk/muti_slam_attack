@@ -71,9 +71,6 @@ source /opt/ros/noetic/setup.bash
 rosbag play ~/catkin_ws/src/LVI-SAM/datasets/handheld.bag --clock
 ```
 
-bag 播放完成后，`$LIO_GRAPH_DUMP_DIR` 下生成约 4000+ 个 `dump_XXXXX.json` 文件。
-LIO-SAM 仅含 odometry 因子（无 loop closure），节点数量与 bag 时长约 1:1（每秒约 2-3 个关键帧）。
-
 ---
 
 ### 阶段 1：录制原始轨迹（基线）
@@ -136,7 +133,7 @@ slamspoof_handheld/vul/vul_{timestamp}.csv    # 分方向脆弱性
 
 ### 阶段 3：选择 Spoofer 位置（SMVS + 因子图引导）
 
-> `--graph-dump-dir` 参数可使用阶段 0（LIO-SAM）或之前 LVI-SAM 运行的 dump 目录。
+> `--graph-dump-dir` 参数使用阶段 0（LIO-SAM）运行的 dump 目录。
 
 ```bash
 # 【重要】将路径替换为阶段 2 新生成的 CSV 文件
