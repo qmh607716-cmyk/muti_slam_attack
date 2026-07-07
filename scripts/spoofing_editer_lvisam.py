@@ -485,9 +485,10 @@ def main():
                         point_step=point_step,
                     )
 
-                # Statistics
-                n_injected = max(0, modified.shape[0] - kept.shape[0])
-                n_removed  = max(0, kept.shape[0] - modified.shape[0])
+                # Statistics: count the points removed by the angular mask and
+                # the synthesized points appended after that removal.
+                n_removed = int(n_original - kept.shape[0])
+                n_injected = max(0, int(modified.shape[0] - kept.shape[0]))
                 state.stats["removed_points_sum"] += n_removed
                 state.stats["removed_points_max"]   = max(
                     state.stats["removed_points_max"], n_removed

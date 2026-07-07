@@ -24,15 +24,14 @@ Improvements over select_spoofer_continuous_opt.py:
    scoring landscapes where GP-based BO fails completely. ~200 evals in < 1 minute.
 
 3. GRAPH-AWARE SCORING (LIO-SAM proxy model):
-   LIO-SAM factor graph is a pure CHAIN (prior → X0 ─ X1 ─ X2 ─ ...).
-   Each node has exactly 2 edges. The LiDAR-IMU coupling strength at each
-   edge is characterised by edge length and yaw change:
+   The proxy graph contains the LiDAR-IMU odometry chain and, when detected,
+   non-consecutive loop-closure factors. Structural importance is computed on
+   the merged graph. For datasets without loop factors, the odometry chain
+   still provides edge-length and yaw-change proxies:
      - Large edge (sparse env) → LiDAR constraint is weak → attack easier
      - Large yaw change → IMU dominates → LiDAR constraint relatively weaker
-   Combined into: lidar_dominance(S) = normalized_edge_length × normalized_yaw_change
-   Combined with: graph_coverage(S) = affected_nodes / total_nodes
-   Final: score = opportunity(S) × persistence(S)
-   (multiplicative: both must be high for success)
+   With loop factors, local loop/factor density is used as a proxy for how
+   strongly nearby nodes are corrected by the graph.
 
 Usage:
     python3 select_spoofer_bi_bo.py \
@@ -514,10 +513,10 @@ def compute_bivul_gate(
 #
 # Design rationale (LIO-SAM as proxy for LVI-SAM):
 #
-# LIO-SAM factor graph is a CHAIN:
-#   prior → X0 ──odometry── X1 ──odometry── X2 ── ... ── X5751
-#   Each node has exactly 2 edges (prior + one odometry, except endpoints).
-#   No loop closure, no GPS, no visual factors.
+# The LIO-SAM proxy graph has the sequential LiDAR-IMU odometry chain and can
+# also contain non-consecutive ICP/distance loop-closure factors when loop
+# closure is enabled and detected. These factors are not visual factors, but
+# they expose route-level graph topology useful for proxy scoring.
 #
 # KEY INSIGHT: In LIO-SAM, the LiDAR-IMU coupling determines attack success.
 # Each odometry edge = [LiDAR scan-matching] + [IMU preintegration] → combined constraint.

@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # ============================================================
-# Resume batch experiment:
+# Batch experiment:
 # handheld / SMVS / removal / D=30m / spoofing_range=80deg
-# Continue run_08 to run_15 without overwriting existing summary.csv
 #
 # Each run:
 #   1) start/check roscore
@@ -23,13 +22,13 @@ set -euo pipefail
 # User configuration
 # -----------------------------
 
-N_RUNS=16
+N_RUNS=15
 START_RUN=1
 
 # New experiment: overwrite summary.csv at the beginning.
 # If the script is interrupted and you want to resume later, set RESET_SUMMARY=0
 # and set START_RUN to the next unfinished run.
-RESET_SUMMARY=0
+RESET_SUMMARY=1
 
 ROS_SETUP="/opt/ros/noetic/setup.bash"
 WS_SETUP="$HOME/catkin_ws/devel_catkin_tools/setup.bash"
@@ -58,13 +57,13 @@ PLATFORM="handheld"
 MODE="removal"
 DISTANCE_THRESHOLD=30
 SPOOFING_RANGE=80
-SPOOFER_X=193.907815
-SPOOFER_Y=-12.706408
+SPOOFER_X=-18.500756557144932
+SPOOFER_Y=70.38033214626245
 
 # Timing parameters.
 LVI_START_WAIT=25
 RECORD_START_WAIT=2
-PLAY_RATE=0.8
+PLAY_RATE=1.0
 POST_PLAY_WAIT=25
 STOP_WAIT=5
 
@@ -173,8 +172,8 @@ cleanup_large_outputs_after_run() {
         rm -f "$TRAJ_BAG" "$TRAJ_BAG.active" 2>/dev/null || true
     fi
 
-    if [[ "${DELETE_ATTACK_BAG_AFTER_RUN}" -eq 1 && "${REGENERATE_ATTACK_BAG_EACH_RUN}" -eq 1 ]]; then
-        rm -f "$ATTACK_BAG" "$ATTACK_BAG.active" 2>/dev/null || true
+    if [[ "${DELETE_ATTACK_BAG_AFTER_RUN}" -eq 1 && "${REGENERATE_ATTACK_BAG_EACH_RUN}" -eq 1 && -n "${ATTACK_BAG:-}" ]]; then
+        rm -f "${ATTACK_BAG}" "${ATTACK_BAG}.active" 2>/dev/null || true
     fi
 }
 
@@ -245,25 +244,39 @@ run_already_ok() {
     return 1
 }
 
-# -----------------------------
-# Read attacked bag path
-# -----------------------------
+write_run_config() {
+    local run_config="$1"
+    local attack_bag="$2"
 
-ATTACK_BAG="$(
-python3 - <<PY
+    python3 - "$CONFIG_FILE" "$run_config" "$attack_bag" "$MODE" \
+        "$SPOOFER_X" "$SPOOFER_Y" "$DISTANCE_THRESHOLD" "$SPOOFING_RANGE" <<'PY'
 import json
-cfg = json.load(open("$CONFIG_FILE"))
-print(cfg["main"]["output_file"])
-PY
-)"
+import os
+import sys
 
-if [[ -z "$ATTACK_BAG" ]]; then
-    echo "[ERROR] Could not read main.output_file from $CONFIG_FILE"
+base_path, out_path, attack_bag, mode, sx, sy, dist_th, spoof_range = sys.argv[1:]
+with open(base_path) as f:
+    cfg = json.load(f)
+
+cfg["main"]["output_file"] = attack_bag
+cfg["main"]["spoofing_mode"] = mode
+cfg["main"]["spoofer_x"] = float(sx)
+cfg["main"]["spoofer_y"] = float(sy)
+cfg["main"]["distance_threshold"] = float(dist_th)
+cfg["main"]["spoofing_range"] = float(spoof_range)
+
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+with open(out_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PY
+}
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[ERROR] Base config not found: $CONFIG_FILE"
     exit 1
 fi
 
 echo "[INFO] Config file: $CONFIG_FILE"
-echo "[INFO] Attacked bag from config: $ATTACK_BAG"
 echo "[INFO] Original CSV: $ORIG_CSV"
 echo "[INFO] Output root: $OUT_ROOT"
 echo "[INFO] Method: $METHOD"
@@ -292,7 +305,7 @@ rosparam set /use_sim_time true
 # -----------------------------
 
 if [[ "$RESET_SUMMARY" -eq 1 ]]; then
-    echo "[INFO] RESET_SUMMARY=0, overwriting summary: $SUMMARY_CSV"
+    echo "[INFO] RESET_SUMMARY=1, overwriting summary: $SUMMARY_CSV"
     cat > "$SUMMARY_CSV" <<EOF
 run,platform,method,mode,distance_threshold,spoofing_range,spoofer_x,spoofer_y,attack_bag,traj_bag,traj_csv,eval_dir,ape_rmse,rpe_1m_rmse,rpe_10m_rmse,status
 EOF
@@ -324,6 +337,8 @@ for RUN_INDEX in $(seq "$START_RUN" "$N_RUNS"); do
     RUN_DIR="$RUNS_DIR/run_${RUN_ID}"
     mkdir -p "$RUN_DIR"
 
+    ATTACK_BAG="$RUN_DIR/handheld_attack_removal_smvs_3080_run_${RUN_ID}.bag"
+    RUN_CONFIG="$RUN_DIR/config_smvs_removal_${RUN_ID}.json"
     TRAJ_BAG="$RUN_DIR/handheld_attack_removal_smvs_3080_run_${RUN_ID}_traj.bag"
     TRAJ_CSV="$RUN_DIR/handheld_attack_removal_smvs_3080_run_${RUN_ID}_traj.csv"
     EVAL_DIR="$RUN_DIR/eval"
@@ -352,10 +367,11 @@ for RUN_INDEX in $(seq "$START_RUN" "$N_RUNS"); do
     if [[ "$REGENERATE_ATTACK_BAG_EACH_RUN" -eq 1 || "$RUN_INDEX" -eq 1 ]]; then
         echo "[RUN $RUN_ID] Stage 4: generating attacked bag ..."
         rm -f "$ATTACK_BAG" "$ATTACK_BAG.active"
+        write_run_config "$RUN_CONFIG" "$ATTACK_BAG"
 
         set +e
         roslaunch slamspoof_icra rosbag_editer_lvisam.launch \
-            config_file_path:="$CONFIG_FILE" \
+            config_file_path:="$RUN_CONFIG" \
             > "$EDIT_LOG" 2>&1
         EDIT_STATUS=$?
         set -e

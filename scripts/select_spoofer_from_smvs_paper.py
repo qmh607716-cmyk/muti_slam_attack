@@ -160,66 +160,87 @@ def load_csvs(
     if "timestamp" in vul_df.columns:
         vul_df["timestamp"] = pd.to_numeric(vul_df["timestamp"], errors="coerce")
 
-    # Fill missing x/y/z from reference trajectory if needed
-    need_traj_fill = (
-        "x" not in smvs_df.columns or smvs_df["x"].isna().any() or
-        "x" not in vul_df.columns or vul_df["x"].isna().any()
-    )
-    if need_traj_fill:
-        if ref_traj_path is None:
-            raise SystemExit(
-                "SMVS or vul CSV is missing x/y/z columns/values, "
-                "but --ref-traj was not provided."
-            )
-        traj_df = pd.read_csv(ref_traj_path)
-        n_traj = len(traj_df)
-        traj_time = traj_df["time"].values
-        traj_x = traj_df["x"].values
-        traj_y = traj_df["y"].values
-        traj_z = traj_df["z"].values
-
-        # Vectorized fill for SMVS: index -> ref_traj row (capped), overflow -> nearest by time
-        if "x" not in smvs_df.columns or smvs_df["x"].isna().any():
-            row_idx = smvs_df["_row_index"].values.astype(int)
-            valid = row_idx < n_traj
-            smvs_df.loc[valid, "x"] = traj_x[row_idx[valid]]
-            smvs_df.loc[valid, "y"] = traj_y[row_idx[valid]]
-            smvs_df.loc[valid, "z"] = traj_z[row_idx[valid]]
-            # overflow: nearest by timestamp
-            overflow = ~valid
-            if overflow.any():
-                t_vals = smvs_df.loc[overflow, "timestamp"].values
-                time_idx = np.argmin(np.abs(traj_time[np.newaxis, :] - t_vals[:, np.newaxis]), axis=1)
-                smvs_df.loc[overflow, "x"] = traj_x[time_idx]
-                smvs_df.loc[overflow, "y"] = traj_y[time_idx]
-                smvs_df.loc[overflow, "z"] = traj_z[time_idx]
-            print(f"[INFO] Filled SMVS x/y/z from {ref_traj_path}", file=sys.stderr)
-
-        # Vul: no timestamp. For in-range indices use ref_traj directly,
-        # for overflow fall back to nearest-by-time using SMVS timestamps.
-        if "x" not in vul_df.columns or vul_df["x"].isna().any():
-            row_idx = vul_df["_row_index"].values.astype(int)
-            valid = row_idx < n_traj
-            vul_df.loc[valid, "x"] = traj_x[row_idx[valid]]
-            vul_df.loc[valid, "y"] = traj_y[row_idx[valid]]
-            vul_df.loc[valid, "z"] = traj_z[row_idx[valid]]
-            overflow = ~valid
-            if overflow.any():
-                # Get corresponding SMVS timestamps (rows are aligned)
-                smvs_t = smvs_df["timestamp"].values
-                smvs_x_arr = smvs_df["x"].values
-                smvs_y_arr = smvs_df["y"].values
-                smvs_z_arr = smvs_df["z"].values
-                # vul row i matches smvs row i, so use smvs xyz (already filled)
-                vul_idx = vul_df.loc[overflow].index
-                vul_df.loc[overflow, "x"] = smvs_x_arr[vul_idx]
-                vul_df.loc[overflow, "y"] = smvs_y_arr[vul_idx]
-                vul_df.loc[overflow, "z"] = smvs_z_arr[vul_idx]
-            print(f"[INFO] Filled vul x/y/z from {ref_traj_path}", file=sys.stderr)
-
     for col in ["x", "y", "z"]:
+        if col not in smvs_df.columns:
+            smvs_df[col] = np.nan
+        if col not in vul_df.columns:
+            vul_df[col] = np.nan
         smvs_df[col] = pd.to_numeric(smvs_df[col], errors="coerce")
         vul_df[col] = pd.to_numeric(vul_df[col], errors="coerce")
+
+    # Fill only missing coordinates. Existing SMVS/vulnerability coordinates are
+    # the data to reproduce; overwriting all rows changes the placement result.
+    need_traj_fill = (
+        smvs_df[["x", "y", "z"]].isna().any(axis=1).any() or
+        vul_df[["x", "y", "z"]].isna().any(axis=1).any()
+    )
+    if need_traj_fill and ref_traj_path is not None:
+        traj_df = pd.read_csv(ref_traj_path)
+        require_columns(traj_df, {"time", "x", "y", "z"}, "Reference trajectory CSV")
+        traj_time = pd.to_numeric(traj_df["time"], errors="coerce").to_numpy()
+        traj_x = pd.to_numeric(traj_df["x"], errors="coerce").to_numpy()
+        traj_y = pd.to_numeric(traj_df["y"], errors="coerce").to_numpy()
+        traj_z = pd.to_numeric(traj_df["z"], errors="coerce").to_numpy()
+        n_traj = len(traj_df)
+
+        def fill_missing_xyz(df: pd.DataFrame, name: str) -> None:
+            missing = df[["x", "y", "z"]].isna().any(axis=1)
+            if not missing.any():
+                return
+
+            idx = df.index[missing].to_numpy()
+            row_idx = df.loc[idx, "_row_index"].to_numpy(dtype=int)
+
+            fill_x = np.full(len(idx), np.nan, dtype=float)
+            fill_y = np.full(len(idx), np.nan, dtype=float)
+            fill_z = np.full(len(idx), np.nan, dtype=float)
+
+            if name == "vul":
+                aligned = row_idx < len(smvs_df)
+                if aligned.any():
+                    sx = smvs_df.iloc[row_idx[aligned]]["x"].to_numpy(dtype=float)
+                    sy = smvs_df.iloc[row_idx[aligned]]["y"].to_numpy(dtype=float)
+                    sz = smvs_df.iloc[row_idx[aligned]]["z"].to_numpy(dtype=float)
+                    finite = np.isfinite(sx) & np.isfinite(sy) & np.isfinite(sz)
+                    aligned_pos = np.flatnonzero(aligned)
+                    fill_x[aligned_pos[finite]] = sx[finite]
+                    fill_y[aligned_pos[finite]] = sy[finite]
+                    fill_z[aligned_pos[finite]] = sz[finite]
+
+            remaining = ~(np.isfinite(fill_x) & np.isfinite(fill_y) & np.isfinite(fill_z))
+            if remaining.any():
+                traj_idx = np.clip(row_idx[remaining], 0, max(n_traj - 1, 0))
+                if "timestamp" in df.columns:
+                    t_vals = df.loc[idx[remaining], "timestamp"].to_numpy(dtype=float)
+                    finite_t = np.isfinite(t_vals) & np.isfinite(traj_time).any()
+                    if finite_t.any():
+                        nearest = np.argmin(
+                            np.abs(traj_time[np.newaxis, :] - t_vals[finite_t, np.newaxis]),
+                            axis=1,
+                        )
+                        traj_idx[finite_t] = nearest
+
+                rem_pos = np.flatnonzero(remaining)
+                fill_x[rem_pos] = traj_x[traj_idx]
+                fill_y[rem_pos] = traj_y[traj_idx]
+                fill_z[rem_pos] = traj_z[traj_idx]
+
+            df.loc[idx, "x"] = fill_x
+            df.loc[idx, "y"] = fill_y
+            df.loc[idx, "z"] = fill_z
+            print(
+                f"[INFO] Filled {len(idx)} missing {name} x/y/z rows from {ref_traj_path}",
+                file=sys.stderr,
+            )
+
+        fill_missing_xyz(smvs_df, "SMVS")
+        fill_missing_xyz(vul_df, "vul")
+    elif need_traj_fill:
+        print(
+            "[WARN] SMVS or vul CSV has missing x/y/z values and --ref-traj "
+            "was not provided; missing rows will be dropped.",
+            file=sys.stderr,
+        )
 
     smvs_df = smvs_df.dropna(subset=["timestamp", "x", "y", "z", "smvs"])
     vul_df = vul_df.dropna(subset=["x", "y", "z", "vec_x", "vec_y", "smvs"])
@@ -515,15 +536,19 @@ def trajectory_line(m: float, n: float) -> Line:
 
 def perpendicular_line_paper(m: float, cx: float, cy: float) -> Line:
     """
-    Perpendicular to y=mx+n that passes through C=(cx,cy).
-    Slope: -1/m, intercept: derived from C.
+    Printed Eq. (7) in the paper:
+        g(x) = -1/m * x + (-m*Cx + Cy)
+
+    This is kept as a literal reproduction option. It does not generally pass
+    through C=(Cx,Cy), despite the surrounding text saying that it should.
     """
     if abs(m) < EPS:
-        # y = n is horizontal, perpendicular should be x = Cx.
+        # Eq. (7) is undefined when m=0; use the text's perpendicular-line
+        # interpretation for this degenerate case.
         return Line(a=1.0, b=0.0, c=-cx)
 
     q = -1.0 / m
-    b = cy + cx / m
+    b = -m * cx + cy
     return Line(a=q, b=-1.0, c=b)
 
 
