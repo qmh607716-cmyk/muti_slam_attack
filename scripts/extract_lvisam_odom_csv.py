@@ -6,12 +6,12 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(
     description="Extract odometry from bag as CSV. "
-                "Auto-detects LVI-SAM vs LIO-SAM topic."
+                "Auto-detects common SLAM odometry topics."
 )
 parser.add_argument("--bag", required=True)
 parser.add_argument("--out", required=True)
 parser.add_argument("--topic", default="auto",
-                    help="Topic to extract. 'auto' detects LVI-SAM or LIO-SAM automatically.")
+                    help="Topic to extract. 'auto' detects supported odometry topics automatically.")
 args = parser.parse_args()
 
 bag_path = Path(args.bag)
@@ -27,6 +27,7 @@ def _detect_topic(bag_path):
     candidates = [
         "/lvi_sam/lidar/mapping/odometry",
         "/lio_sam/mapping/odometry",
+        "/aft_mapped_to_init",
     ]
     for t in candidates:
         if t in topics_found:

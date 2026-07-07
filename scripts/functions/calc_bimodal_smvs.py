@@ -140,6 +140,10 @@ def _project_kp_to_lidar_bucket(
     returning per-bucket feature count.
 
     Approximate: feature at 5m depth (real depth can be obtained from LiDAR projection).
+    The 72 buckets span the 360° azimuth around the robot, indexed in the world
+    frame. Each keypoint's azimuth is determined solely by its horizontal pixel
+    coordinate `u`; the vertical pixel `v` is used only to filter keypoints that
+    fall inside the camera's vertical FOV, never to influence the azimuth bucket.
     """
     n_buckets = int(360.0 / step_deg)
     counts = np.zeros(n_buckets, dtype=np.float64)
@@ -147,19 +151,18 @@ def _project_kp_to_lidar_bucket(
     if not kp_list:
         return counts
 
-    fx, fy, u0, v0 = _CAM_FX, _CAM_FY, _CAM_U0, _CAM_V0
+    fx, u0 = _CAM_FX, _CAM_U0
     cam_world = robot_yaw + lidar_to_cam_yaw
 
+    half_v_tan = np.tan(_FOV_V * 0.5)
     for kp in kp_list:
         u, v = kp.pt[0], kp.pt[1]
+        # Vertical FOV gate: drop keypoints outside the camera's pitch range
+        if abs(v - _CAM_V0) / _CAM_FY > half_v_tan:
+            continue
+        # Azimuth comes from the horizontal pixel only
         x_c = (u - u0) / fx
-        y_c = (v - v0) / fy
-        z_c = 5.0
-        r_inv = z_c / np.sqrt(x_c**2 + y_c**2 + 1.0)
-        x_l = r_inv * x_c
-        y_l = r_inv * y_c
-
-        theta_lidar = np.arctan2(y_l, x_l)
+        theta_lidar = np.arctan2(0.0, x_c) + cam_world
         theta_lidar_deg = np.degrees(theta_lidar) + 180.0
         idx = int(theta_lidar_deg / step_deg) % n_buckets
         counts[idx] += 1.0

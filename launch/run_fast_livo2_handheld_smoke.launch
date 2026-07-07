@@ -1,0 +1,28 @@
+<launch>
+  <!-- FAST-LIVO2 smoke-test launch for the LVI-SAM handheld bag. -->
+
+  <arg name="lidar_in" default="/points_raw" />
+  <arg name="lidar_out" default="/fast_livo2/points_raw" />
+  <arg name="image_in" default="/camera/image_raw/compressed" />
+  <arg name="image_out" default="/camera/image_raw_fastlivo2" />
+  <arg name="rviz" default="false" />
+
+  <node name="image_decompress_fast_livo2"
+        pkg="image_transport"
+        type="republish"
+        output="screen"
+        args="compressed in:=$(arg image_in) raw out:=$(arg image_out)" />
+
+  <node pkg="slamspoof_icra"
+        type="fast_livo2_points_adapter.py"
+        name="fast_livo2_points_adapter"
+        output="screen">
+    <param name="input_topic" value="$(arg lidar_in)" />
+    <param name="output_topic" value="$(arg lidar_out)" />
+    <param name="time_scale" value="1000000.0" />
+  </node>
+
+  <include file="$(find fast_livo)/launch/mapping_handheld.launch">
+    <arg name="rviz" value="$(arg rviz)" />
+  </include>
+</launch>

@@ -1,0 +1,75 @@
+<launch>
+    <!--
+        R3LIVE smoke-test launch for the LVI-SAM handheld bag.
+
+        This is a secondary-experiment adapter, not a calibrated benchmark
+        launch yet. It avoids R3LIVE's LiDAR_front_end because handheld.bag
+        publishes /points_raw as x/y/z/intensity/ring/time, while R3LIVE
+        mapping expects PointXYZINormal with curvature as per-point time.
+    -->
+
+    <arg name="lidar_in" default="/points_raw" />
+    <arg name="lidar_out" default="/r3live/points_raw_xyzinormal" />
+    <arg name="imu_topic" default="/imu_raw" />
+    <arg name="image_topic" default="/camera/image_raw" />
+    <arg name="rviz" default="0" />
+    <arg name="map_output_dir" default="$(env HOME)/r3live_output/slamspoof_handheld_smoke" />
+
+    <!-- Base R3LIVE parameters, then dataset-specific overrides below. -->
+    <rosparam command="load" file="$(find r3live)/../config/r3live_config.yaml" />
+
+    <param name="/LiDAR_pointcloud_topic" type="string" value="$(arg lidar_out)" />
+    <param name="/IMU_topic" type="string" value="$(arg imu_topic)" />
+    <param name="/Image_topic" type="string" value="$(arg image_topic)" />
+
+    <param name="r3live_common/map_output_dir" type="string" value="$(arg map_output_dir)" />
+    <param name="r3live_common/record_offline_map" type="int" value="0" />
+    <param name="r3live_common/estimate_i2c_extrinsic" type="int" value="1" />
+    <param name="r3live_common/estimate_intrinsic" type="int" value="1" />
+
+    <!-- Approximate pinhole initialization from LVI-SAM params_camera.yaml.
+         The original model is MEI/fisheye, so this must be validated by a
+         clean R3LIVE run before using attack results quantitatively. -->
+    <rosparam ns="r3live_vio" param="image_width">720</rosparam>
+    <rosparam ns="r3live_vio" param="image_height">540</rosparam>
+    <rosparam ns="r3live_vio" param="camera_intrinsic">
+        [669.8940458885896, 0.0, 377.9459252967363,
+         0.0, 669.1450614220616, 279.63655686698144,
+         0.0, 0.0, 1.0]
+    </rosparam>
+    <rosparam ns="r3live_vio" param="camera_dist_coeffs">
+        [-0.0399258932468764, 0.15160828121223818,
+         0.00017756967825777937, -0.0011531239076798612, 0.0]
+    </rosparam>
+    <rosparam ns="r3live_vio" param="camera_ext_R">
+        [0.0, 0.0, -1.0,
+         -1.0, 0.0, 0.0,
+         0.0, 1.0, 0.0]
+    </rosparam>
+    <rosparam ns="r3live_vio" param="camera_ext_t">
+        [0.006422381632411965, 0.019939800449065116, 0.03364235163589248]
+    </rosparam>
+
+    <node pkg="slamspoof_icra"
+          type="r3live_points_adapter.py"
+          name="r3live_points_adapter"
+          output="screen">
+        <param name="input_topic" value="$(arg lidar_in)" />
+        <param name="output_topic" value="$(arg lidar_out)" />
+        <param name="time_to_curvature_scale" value="1000.0" />
+    </node>
+
+    <node pkg="r3live"
+          type="r3live_mapping"
+          name="r3live_mapping"
+          output="screen"
+          required="true" />
+
+    <group if="$(arg rviz)">
+        <node name="rvizvisualisation"
+              pkg="rviz"
+              type="rviz"
+              output="log"
+              args="-d $(find r3live)/../config/rviz/r3live_rviz_config.rviz" />
+    </group>
+</launch>
