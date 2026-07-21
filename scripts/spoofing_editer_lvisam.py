@@ -251,6 +251,7 @@ def main():
     typestore       = get_typestore(Stores.ROS1_NOETIC)
     points_topic    = config["main"]["lidar_topic"]
     spoofing_mode   = config["main"].get("spoofing_mode", "removal")
+    attack_angle_mode = config["main"].get("attack_angle_mode", "lidar_local")
     spoofer_x       = float(config["main"]["spoofer_x"])
     spoofer_y       = float(config["main"]["spoofer_y"])
     distance_thresh = float(config["main"]["distance_threshold"])
@@ -317,6 +318,12 @@ def main():
             f"[spoofing_editer_lvisam] WARNING: Unknown spoofing_mode '{spoofing_mode}', using 'removal'."
         )
         spoofing_mode = "removal"
+    if attack_angle_mode not in ("lidar_local", "world"):
+        print(
+            f"[spoofing_editer_lvisam] WARNING: Unknown attack_angle_mode "
+            f"'{attack_angle_mode}', using 'lidar_local'."
+        )
+        attack_angle_mode = "lidar_local"
 
     print(
         f"[spoofing_editer_lvisam] mode={spoofing_mode}  "
@@ -327,7 +334,8 @@ def main():
         f"square_rot={square_rotate_rad}  "
         f"M_corr={M_corr}m  "
         f"auto_cycle={auto_cycle}  "
-        f"distance_thresh={distance_thresh}m"
+        f"distance_thresh={distance_thresh}m  "
+        f"attack_angle_mode={attack_angle_mode}"
     )
 
     # ── Initialise state (with a seeded RNG for reproducibility) ──────────
@@ -382,10 +390,14 @@ def main():
             if is_triggered:
                 state.stats["triggered_frames"] += 1
 
-                # Attack direction in LiDAR local frame
-                center_rad = attack_angle_lidar_local(
-                    robot_x, robot_y, spoofer_x, spoofer_y, robot_yaw
-                )
+                if attack_angle_mode == "world":
+                    center_rad = attack_angle_world(
+                        robot_x, robot_y, spoofer_x, spoofer_y
+                    )
+                else:
+                    center_rad = attack_angle_lidar_local(
+                        robot_x, robot_y, spoofer_x, spoofer_y, robot_yaw
+                    )
                 # Convert to degrees for spoofing_sim_lvisam.
                 # polar_mask_2d uses (atan2(y,x)+180)%360 convention, so we
                 # wrap to the same [0, 360) range to match.
@@ -520,6 +532,7 @@ def main():
     print("  spoofing_editer_lvisam summary")
     print("=" * 54)
     print(f"  Mode                 : {spoofing_mode}")
+    print(f"  Attack angle mode    : {attack_angle_mode}")
     print(f"  Total frames         : {n}")
     print(f"  Triggered frames     : {t}  ({100.0 * t / max(n, 1):.4f}%)")
     if t > 0:
@@ -529,13 +542,12 @@ def main():
         print(
             f"  Max removed (frame)  : {s['removed_points_max']}"
         )
-        if spoofing_mode != "removal":
-            print(
-                f"  Mean injected/frame  : {s['injected_points_sum'] / t:.1f}"
-            )
-            print(
-                f"  Max injected (frame) : {s['injected_points_max']}"
-            )
+        print(
+            f"  Mean injected/frame  : {s['injected_points_sum'] / t:.1f}"
+        )
+        print(
+            f"  Max injected (frame) : {s['injected_points_max']}"
+        )
     print(f"  Output bag           : {output_file}")
     print("=" * 54)
 

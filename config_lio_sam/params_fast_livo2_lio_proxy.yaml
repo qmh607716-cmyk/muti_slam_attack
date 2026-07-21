@@ -1,0 +1,78 @@
+lio_sam:
+
+  # FAST-LIVO2 official Livox bag converted by
+  # convert_fast_livo2_livox_to_liosam_bag.py.
+  pointCloudTopic: "/points_raw"
+  imuTopic: "/imu_raw"
+  odomTopic: "odometry/imu"
+  gpsTopic: "odometry/gps"
+
+  lidarFrame: "base_link"
+  baselinkFrame: "base_link"
+  odometryFrame: "odom"
+  mapFrame: "map"
+
+  useImuHeadingInitialization: false
+  useGpsElevation: false
+  gpsCovThreshold: 2.0
+  poseCovThreshold: 25.0
+
+  savePCD: false
+  savePCDDirectory: "/Downloads/LOAM/"
+
+  sensor: livox
+  N_SCAN: 6
+  Horizon_SCAN: 4000
+  downsampleRate: 1
+  lidarMinRange: 0.8
+  lidarMaxRange: 100.0
+
+  imuAccNoise: 5.0e-01
+  imuGyrNoise: 3.0e-01
+  imuAccBiasN: 1.0e-04
+  imuGyrBiasN: 1.0e-04
+  imuGravity: 9.80511
+  imuRPYWeight: 0.01
+
+  # FAST-LIVO2 Avia official config uses identity LiDAR-IMU rotation and this
+  # translation. This is for proxy graph generation, not the victim pipeline.
+  extrinsicTrans: [0.04165, 0.02326, -0.0284]
+  extrinsicRot: [1, 0, 0,
+                 0, 1, 0,
+                 0, 0, 1]
+  extrinsicRPY: [1, 0, 0,
+                 0, 1, 0,
+                 0, 0, 1]
+
+  edgeThreshold: 1.0
+  surfThreshold: 0.1
+  edgeFeatureMinValidNum: 10
+  surfFeatureMinValidNum: 80
+
+  odometrySurfLeafSize: 0.4
+  mappingCornerLeafSize: 0.2
+  mappingSurfLeafSize: 0.4
+
+  z_tollerance: 1000
+  rotation_tollerance: 1000
+
+  numberOfCores: 4
+  mappingProcessInterval: 0.15
+
+  surroundingkeyframeAddingDistThreshold: 0.5
+  surroundingkeyframeAddingAngleThreshold: 0.2
+  surroundingKeyframeDensity: 1.0
+  surroundingKeyframeSearchRadius: 30.0
+
+  loopClosureEnableFlag: true
+  loopClosureFrequency: 1.0
+  surroundingKeyframeSize: 25
+  historyKeyframeSearchRadius: 5.0
+  historyKeyframeSearchTimeDiff: 20.0
+  historyKeyframeSearchNum: 15
+  historyKeyframeFitnessScore: 0.5
+  historyKeyframePoseDistFallback: 1.0
+
+  globalMapVisualizationSearchRadius: 1000.0
+  globalMapVisualizationPoseDensity: 10.0
+  globalMapVisualizationLeafSize: 1.0

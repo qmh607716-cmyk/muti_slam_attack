@@ -615,34 +615,19 @@ def static_injection(
         else:
             scale_S = wall_distance * np.sqrt(2.0)
 
-        if static_geometry_model == "beam_project" and affected.shape[0] > 0:
-            replace = affected.shape[0] < n_wall
-            idx = rng.choice(affected.shape[0], size=n_wall, replace=replace)
-            selected = affected[idx]
-            wall_records = _square_beam_project_records(
-                selected,
-                scale_S,
-                center_deg,
-                half_range_deg,
-                rotate_rad,
-                intensity_value=wall_intensity,
-                point_step=point_step,
-                intensities=None,  # inherit from selected source records
-            )
-        else:
-            wall_records = _square_wall_records(
-                n_wall,
-                scale_S,
-                center_deg,
-                half_range_deg,
-                rotate_rad,
-                rng,
-                intensity_value=wall_intensity,
-                num_lines=int(vertical_lines),
-                point_step=point_step,
-                lidar_scan_period=lidar_scan_period,
-                intensities=sector_intensities,
-            )
+        wall_records = _square_wall_records(
+            n_wall,
+            scale_S,
+            center_deg,
+            half_range_deg,
+            rotate_rad,
+            rng,
+            intensity_value=wall_intensity,
+            num_lines=int(vertical_lines),
+            point_step=point_step,
+            lidar_scan_period=lidar_scan_period,
+            intensities=sector_intensities,
+        )
 
         if kept.shape[0] == 0:
             return wall_records

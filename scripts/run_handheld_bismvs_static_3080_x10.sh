@@ -10,7 +10,7 @@ set -euo pipefail
 #   2) generate attacked bag
 #   3) launch LVI-SAM
 #   4) record odometry
-#   5) play attacked bag with --clock -r 0.8
+#   5) play attacked bag with --clock -r PLAY_RATE
 #   6) wait for LVI-SAM post-processing
 #   7) stop LVI-SAM first, then stop recorder
 #   8) extract trajectory CSV
@@ -23,6 +23,12 @@ set -euo pipefail
 # -----------------------------
 
 N_RUNS=15
+START_RUN=1
+
+# New experiment: overwrite summary.csv at the beginning.
+# If the script is interrupted and you want to resume later, set RESET_SUMMARY=0
+# and set START_RUN to the next unfinished run.
+RESET_SUMMARY=1
 
 ROS_SETUP="/opt/ros/noetic/setup.bash"
 WS_SETUP="$HOME/catkin_ws/devel_catkin_tools/setup.bash"
@@ -36,7 +42,7 @@ CONFIG_FILE="$SLAMSPOOF_DIR/config_lvisam.json"
 ORIG_CSV="$LVI_DATASET_DIR/original/handheld_original_traj.csv"
 
 # Output root for this repeated experiment.
-OUT_ROOT="$LVI_DATASET_DIR/repeat_removal/bismvs_3080"
+OUT_ROOT="$LVI_DATASET_DIR/repeat_static/bismvs_3080"
 
 # Topic recorded from LVI-SAM.
 ODOM_TOPIC="/lvi_sam/lidar/mapping/odometry"
@@ -48,11 +54,11 @@ LVI_LAUNCH_FILE="run.launch"
 # Attack metadata.
 METHOD="bismvs"
 PLATFORM="handheld"
-MODE="removal"
-DISTANCE_THRESHOLD=30
-SPOOFING_RANGE=80
-SPOOFER_X=35.48
-SPOOFER_Y=-107.62
+MODE="static"
+DISTANCE_THRESHOLD="${DISTANCE_THRESHOLD:-30}"
+SPOOFING_RANGE="${SPOOFING_RANGE:-80}"
+SPOOFER_X="${SPOOFER_X:-31.28075677647965}"
+SPOOFER_Y="${SPOOFER_Y:--102.07423272183334}"
 
 # Timing parameters.
 # Give LVI-SAM enough time to initialize before replay.
@@ -62,7 +68,7 @@ LVI_START_WAIT=25
 RECORD_START_WAIT=2
 
 # User requested replay speed.
-PLAY_RATE=0.8
+PLAY_RATE=1.0
 
 # User requested post-play wait.
 # After rosbag play finishes, LVI-SAM may still be processing buffered messages.
@@ -256,29 +262,48 @@ append_summary_row() {
     echo "${run_id},${PLATFORM},${METHOD},${MODE},${DISTANCE_THRESHOLD},${SPOOFING_RANGE},${SPOOFER_X},${SPOOFER_Y},${ATTACK_BAG},${traj_bag},${traj_csv},${eval_dir},${ape_rmse},${rpe1_rmse},${rpe10_rmse},${status}" >> "$SUMMARY_CSV"
 }
 
-# -----------------------------
-# Read attacked bag path
-# -----------------------------
+write_run_config() {
+    local run_config="$1"
+    local attack_bag="$2"
 
-ATTACK_BAG="$(
-python3 - <<PY
+    python3 - "$CONFIG_FILE" "$run_config" "$attack_bag" "$MODE" \
+        "$SPOOFER_X" "$SPOOFER_Y" "$DISTANCE_THRESHOLD" "$SPOOFING_RANGE" <<'PY'
 import json
-cfg = json.load(open("$CONFIG_FILE"))
-print(cfg["main"]["output_file"])
-PY
-)"
+import os
+import sys
 
-if [[ -z "$ATTACK_BAG" ]]; then
-    echo "[ERROR] Could not read main.output_file from $CONFIG_FILE"
+base_path, out_path, attack_bag, mode, sx, sy, dist_th, spoof_range = sys.argv[1:]
+with open(base_path) as f:
+    cfg = json.load(f)
+
+cfg["main"]["output_file"] = attack_bag
+cfg["main"]["spoofing_mode"] = mode
+cfg["main"]["spoofer_x"] = float(sx)
+cfg["main"]["spoofer_y"] = float(sy)
+cfg["main"]["distance_threshold"] = float(dist_th)
+cfg["main"]["spoofing_range"] = float(spoof_range)
+
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+with open(out_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PY
+}
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[ERROR] Base config not found: $CONFIG_FILE"
     exit 1
 fi
 
 echo "[INFO] Config file: $CONFIG_FILE"
-echo "[INFO] Attacked bag from config: $ATTACK_BAG"
 echo "[INFO] Original CSV: $ORIG_CSV"
 echo "[INFO] Output root: $OUT_ROOT"
+echo "[INFO] Method: $METHOD"
+echo "[INFO] Mode: $MODE"
+echo "[INFO] Spoofer: ($SPOOFER_X, $SPOOFER_Y)"
 echo "[INFO] Replay rate: $PLAY_RATE"
 echo "[INFO] Post-play wait: $POST_PLAY_WAIT seconds"
+echo "[INFO] Start run: $START_RUN"
+echo "[INFO] Total runs: $N_RUNS"
 
 if [[ ! -f "$ORIG_CSV" ]]; then
     echo "[ERROR] ORIG_CSV not found: $ORIG_CSV"
@@ -294,26 +319,38 @@ start_roscore_if_needed
 rosparam set /use_sim_time true
 
 # Initialize summary CSV.
-cat > "$SUMMARY_CSV" <<EOF
+if [[ "$RESET_SUMMARY" -eq 1 ]]; then
+    echo "[INFO] RESET_SUMMARY=1, overwriting summary: $SUMMARY_CSV"
+    cat > "$SUMMARY_CSV" <<EOF
 run,platform,method,mode,distance_threshold,spoofing_range,spoofer_x,spoofer_y,attack_bag,traj_bag,traj_csv,eval_dir,ape_rmse,rpe_1m_rmse,rpe_10m_rmse,status
 EOF
+else
+    echo "[INFO] RESET_SUMMARY=0, appending to existing summary if present."
+    if [[ ! -f "$SUMMARY_CSV" ]]; then
+        cat > "$SUMMARY_CSV" <<EOF
+run,platform,method,mode,distance_threshold,spoofing_range,spoofer_x,spoofer_y,attack_bag,traj_bag,traj_csv,eval_dir,ape_rmse,rpe_1m_rmse,rpe_10m_rmse,status
+EOF
+    fi
+fi
 
 # -----------------------------
 # Main loop
 # -----------------------------
 
-for RUN_INDEX in $(seq 1 "$N_RUNS"); do
+for RUN_INDEX in $(seq "$START_RUN" "$N_RUNS"); do
     RUN_ID="$(printf "%02d" "$RUN_INDEX")"
 
     echo "============================================================"
-    echo "[RUN $RUN_ID/$N_RUNS] handheld bismvs removal D=30 range=80"
+    echo "[RUN $RUN_ID/$N_RUNS] handheld bismvs static D=30 range=80"
     echo "============================================================"
 
     RUN_DIR="$RUNS_DIR/run_${RUN_ID}"
     mkdir -p "$RUN_DIR"
 
-    TRAJ_BAG="$RUN_DIR/handheld_attack_removal_bismvs_3080_run_${RUN_ID}_traj.bag"
-    TRAJ_CSV="$RUN_DIR/handheld_attack_removal_bismvs_3080_run_${RUN_ID}_traj.csv"
+    ATTACK_BAG="$RUN_DIR/handheld_attack_static_bismvs_3080_run_${RUN_ID}.bag"
+    RUN_CONFIG="$RUN_DIR/config_bismvs_static_${RUN_ID}.json"
+    TRAJ_BAG="$RUN_DIR/handheld_attack_static_bismvs_3080_run_${RUN_ID}_traj.bag"
+    TRAJ_CSV="$RUN_DIR/handheld_attack_static_bismvs_3080_run_${RUN_ID}_traj.csv"
     EVAL_DIR="$RUN_DIR/eval"
     mkdir -p "$EVAL_DIR"
 
@@ -342,10 +379,11 @@ for RUN_INDEX in $(seq 1 "$N_RUNS"); do
     if [[ "$REGENERATE_ATTACK_BAG_EACH_RUN" -eq 1 || "$RUN_INDEX" -eq 1 ]]; then
         echo "[RUN $RUN_ID] Stage 4: generating attacked bag ..."
         rm -f "$ATTACK_BAG" "$ATTACK_BAG.active"
+        write_run_config "$RUN_CONFIG" "$ATTACK_BAG"
 
         set +e
         roslaunch slamspoof_icra rosbag_editer_lvisam.launch \
-            config_file_path:="$CONFIG_FILE" \
+            config_file_path:="$RUN_CONFIG" \
             > "$EDIT_LOG" 2>&1
         EDIT_STATUS=$?
         set -e

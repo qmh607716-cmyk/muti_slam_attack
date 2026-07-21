@@ -91,6 +91,13 @@ def parse_args() -> argparse.Namespace:
                         help="Use top-k high frame-wise SMVS frames. Default: 10")
     parser.add_argument("--score-threshold", type=float, default=-1000.0,
                         help="Only consider frames with SMVS above this threshold. Default: -1000.0")
+    parser.add_argument("--score-direction", choices=["auto", "larger", "smaller"], default="larger",
+                        help=(
+                            "How to rank vulnerable SMVS frames. larger means higher SMVS is more vulnerable; "
+                            "smaller means lower/more negative SMVS is more vulnerable. auto infers from the "
+                            "score distribution for diagnostics. Default: larger, matching the original code's "
+                            "argmax/descending SMVS convention."
+                        ))
     parser.add_argument("--sigma", type=float, default=2.0,
                         help="Outlier removal threshold in standard deviations. Paper uses ±2σ. Default: 2.0")
     parser.add_argument("--time-window", type=float, default=None,
@@ -258,14 +265,16 @@ def select_high_smvs_frames(
     threshold: float,
     top_k: int,
     time_window: Optional[float] = None,
+    score_direction: str = "larger",
 ) -> pd.DataFrame:
     if top_k < 2:
         raise SystemExit("--top-k must be >= 2 because intersections require at least two rays.")
 
-    # Sort by SMVS (direction depends on SMVS convention):
-    #   - Positive SMVS (higher=better): use nlargest
-    #   - Negative SMVS (lower=better, as in jackal dataset): use nsmallest
-    if smvs_df["smvs"].max() > 0:
+    direction = infer_score_direction(smvs_df["smvs"], score_direction)
+
+    # Sort by SMVS convention. The original SLAMSpoof code uses argmax /
+    # descending score order, so the paper-reproduction default is "larger".
+    if direction == "larger":
         candidates = smvs_df[smvs_df["smvs"] > threshold].copy()
         if len(candidates) == 0:
             print(f"[WARN] No frames with smvs > {threshold}; falling back to all frames.", file=sys.stderr)
@@ -289,11 +298,32 @@ def select_high_smvs_frames(
 
         if len(candidates) < 2:
             print(f"[WARN] Time window filter left only {len(candidates)} frames; reverting to all selected.", file=sys.stderr)
-            candidates = smvs_df.nlargest(min(top_k, len(smvs_df)), "smvs").reset_index(drop=True)
+            if direction == "larger":
+                candidates = smvs_df.nlargest(min(top_k, len(smvs_df)), "smvs").reset_index(drop=True)
+            else:
+                candidates = smvs_df.nsmallest(min(top_k, len(smvs_df)), "smvs").reset_index(drop=True)
         else:
             print(f"[TIME FILTER] Removed {before_filter - len(candidates)} frames outside time window ±{time_window}s from median t={median_t:.2f}s", file=sys.stderr)
 
+    candidates.attrs["score_direction"] = direction
     return candidates
+
+
+def infer_score_direction(smvs: pd.Series, requested: str) -> str:
+    if requested in ("larger", "smaller"):
+        return requested
+    if requested != "auto":
+        raise ValueError(f"unknown score direction: {requested}")
+
+    vals = pd.to_numeric(smvs, errors="coerce").dropna()
+    if vals.empty:
+        raise SystemExit("SMVS CSV has no valid scores.")
+
+    # Diagnostic heuristic only. Do not use this for strict paper reproduction;
+    # the original code uses argmax / descending order.
+    if float(vals.median()) < 0.0 or float((vals < 0.0).mean()) > 0.5:
+        return "smaller"
+    return "larger"
 
 
 def decide_match_mode(smvs_df: pd.DataFrame, vul_df: pd.DataFrame, requested: str) -> str:
@@ -668,8 +698,15 @@ def select_spoofer(
     max_match_distance: Optional[float],
     verbose: bool,
     time_window: Optional[float] = None,
+    score_direction: str = "larger",
 ) -> Dict[str, object]:
-    high_df = select_high_smvs_frames(smvs_df, score_threshold, top_k, time_window)
+    high_df = select_high_smvs_frames(
+        smvs_df,
+        score_threshold,
+        top_k,
+        time_window,
+        score_direction=score_direction,
+    )
     match_mode = decide_match_mode(smvs_df, vul_df, match_mode_requested)
 
     rays = build_rays(
@@ -729,6 +766,7 @@ def select_spoofer(
         "line_formula_mode": line_formula,
         "candidate_side": candidate_side,
         "match_mode": match_mode,
+        "score_direction": high_df.attrs.get("score_direction", score_direction),
         "spoofer_x": None if primary_selected is None else primary_selected["spoofer_x"],
         "spoofer_y": None if primary_selected is None else primary_selected["spoofer_y"],
         "critical_object_center": {"x": float(cx), "y": float(cy)},
@@ -807,6 +845,7 @@ def main() -> None:
         max_match_distance=args.max_match_distance,
         verbose=args.verbose,
         time_window=args.time_window,
+        score_direction=args.score_direction,
     )
 
     output_data = build_config_output(result, args)
@@ -818,6 +857,7 @@ def main() -> None:
     print(f"line_formula_mode: {result['line_formula_mode']}")
     print(f"candidate_side:    {result['candidate_side']}")
     print(f"match_mode:        {result['match_mode']}")
+    print(f"score_direction:   {result['score_direction']}")
     print(f"critical center:   ({result['critical_object_center']['x']:.6f}, {result['critical_object_center']['y']:.6f})")
     print(f"trajectory:        y = {result['trajectory_fit']['m']:.6f} * x + {result['trajectory_fit']['n']:.6f}")
 

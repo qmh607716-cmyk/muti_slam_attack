@@ -1,0 +1,80 @@
+lio_sam:
+
+  # R3LIVE official Livox bag converted by
+  # convert_fast_livo2_livox_to_liosam_bag.py. The converter name is historical;
+  # it is a generic Livox CustomMsg -> LIO-SAM PointCloud2 adapter.
+  pointCloudTopic: "/points_raw"
+  imuTopic: "/imu_raw"
+  odomTopic: "odometry/imu"
+  gpsTopic: "odometry/gps"
+
+  lidarFrame: "base_link"
+  baselinkFrame: "base_link"
+  odometryFrame: "odom"
+  mapFrame: "map"
+
+  useImuHeadingInitialization: false
+  useGpsElevation: false
+  gpsCovThreshold: 2.0
+  poseCovThreshold: 25.0
+
+  savePCD: false
+  savePCDDirectory: "/Downloads/LOAM/"
+
+  sensor: livox
+  N_SCAN: 6
+  Horizon_SCAN: 4000
+  downsampleRate: 1
+  lidarMinRange: 0.8
+  lidarMaxRange: 100.0
+
+  imuAccNoise: 5.0e-01
+  imuGyrNoise: 3.0e-01
+  imuAccBiasN: 1.0e-04
+  imuGyrBiasN: 1.0e-04
+  imuGravity: 9.80511
+  imuRPYWeight: 0.01
+
+  # The R3LIVE public config does not expose a separate LiDAR-IMU transform for
+  # the Livox Avia bag. Use a neutral proxy transform; this is not the victim
+  # R3LIVE optimizer and is used only for attacker-side route-graph cues.
+  extrinsicTrans: [0.0, 0.0, 0.0]
+  extrinsicRot: [1, 0, 0,
+                 0, 1, 0,
+                 0, 0, 1]
+  extrinsicRPY: [1, 0, 0,
+                 0, 1, 0,
+                 0, 0, 1]
+
+  edgeThreshold: 1.0
+  surfThreshold: 0.1
+  edgeFeatureMinValidNum: 10
+  surfFeatureMinValidNum: 80
+
+  odometrySurfLeafSize: 0.4
+  mappingCornerLeafSize: 0.2
+  mappingSurfLeafSize: 0.4
+
+  z_tollerance: 1000
+  rotation_tollerance: 1000
+
+  numberOfCores: 4
+  mappingProcessInterval: 0.15
+
+  surroundingkeyframeAddingDistThreshold: 0.5
+  surroundingkeyframeAddingAngleThreshold: 0.2
+  surroundingKeyframeDensity: 1.0
+  surroundingKeyframeSearchRadius: 30.0
+
+  loopClosureEnableFlag: true
+  loopClosureFrequency: 1.0
+  surroundingKeyframeSize: 25
+  historyKeyframeSearchRadius: 5.0
+  historyKeyframeSearchTimeDiff: 20.0
+  historyKeyframeSearchNum: 15
+  historyKeyframeFitnessScore: 0.5
+  historyKeyframePoseDistFallback: 1.0
+
+  globalMapVisualizationSearchRadius: 1000.0
+  globalMapVisualizationPoseDensity: 10.0
+  globalMapVisualizationLeafSize: 1.0

@@ -1,0 +1,9 @@
+<launch>
+  <arg name="param_file" default="$(find slamspoof_icra)/config_lio_sam/params_fast_livo2_lio_proxy.yaml" />
+
+  <rosparam file="$(arg param_file)" command="load" />
+
+  <include file="$(find lio_sam)/launch/include/module_loam.launch">
+    <arg name="project" value="lio_sam" />
+  </include>
+</launch>

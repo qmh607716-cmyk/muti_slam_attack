@@ -1,0 +1,2 @@
+dataset,gps_rows,clean_rows,gps_path_length_m,clean_path_length_m,alignment_scale,aligned_xy_rmse_m,aligned_xy_mean_m,aligned_xy_max_m
+handheld,8215,8143,2285.3188132054015,2273.2707808656637,1.0082009035768276,4.466745169318725,3.5044829353935754,11.26083275589101

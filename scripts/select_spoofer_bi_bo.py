@@ -1451,6 +1451,9 @@ def load_frames(smvs_path: str, vul_path: str, top_k: int) -> List[VulFrame]:
     # Get Bi-Vul columns from vul_df
     bi_vul_cols = [f"bi_vul_{i:02d}" for i in range(N_BUCKETS)]
     l_vul_cols = [f"l_vul_{i:02d}" for i in range(N_BUCKETS)]
+    missing_cols = [c for c in bi_vul_cols + l_vul_cols if c not in vul_df.columns]
+    if missing_cols:
+        raise KeyError(f"Vulnerability CSV missing directional columns: {missing_cols[:8]}...")
 
     # Match by timestamp
     vul_df_indexed = vul_df.set_index("timestamp")
@@ -1461,6 +1464,8 @@ def load_frames(smvs_path: str, vul_path: str, top_k: int) -> List[VulFrame]:
 
         if ts in vul_df_indexed.index:
             vul_row = vul_df_indexed.loc[ts]
+            if isinstance(vul_row, pd.DataFrame):
+                vul_row = vul_row.iloc[0]
         else:
             # Nearest timestamp
             vul_row = vul_df.iloc[(vul_df["timestamp"] - ts).abs().argsort().iloc[0]]
@@ -1495,7 +1500,7 @@ def load_traj(traj_path: str) -> Tuple[np.ndarray, np.ndarray]:
     for col in ["x", "y"]:
         if col not in traj_df.columns:
             raise SystemExit(f"Trajectory CSV missing column: {col}")
-    traj_df[col] = pd.to_numeric(traj_df[col], errors="coerce")
+        traj_df[col] = pd.to_numeric(traj_df[col], errors="coerce")
 
     if "time" in traj_df.columns:
         traj_df["time"] = pd.to_numeric(traj_df["time"], errors="coerce")

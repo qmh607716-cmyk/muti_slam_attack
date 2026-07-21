@@ -179,19 +179,39 @@ install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
 )
 
+install(DIRECTORY config_lio_sam/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config_lio_sam
+)
+
 install(DIRECTORY scripts/
   DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}/scripts
 )
 
 catkin_install_python(PROGRAMS
+  scripts/convert_fast_livo2_livox_to_liosam_bag.py
+  scripts/compute_fast_livo2_vulnerability.py
+  scripts/compute_r3live_vulnerability.py
   scripts/extract_lvisam_odom_csv.py
   scripts/fast_livo2_points_adapter.py
   scripts/r3live_points_adapter.py
+  scripts/select_fast_livo2_bismvs_position.py
+  scripts/spoofing_editer_livox_fastlivo2.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 install(PROGRAMS
   scripts/run_handheld_supp_slam_once.sh
+  scripts/run_fast_livo2_official_once.sh
+  scripts/prepare_fast_livo2_official_positions.sh
+  scripts/prepare_fast_livo2_method_positions.sh
+  scripts/prepare_fast_livo2_lio_sam_proxy_graph.sh
+  scripts/run_fast_livo2_methods_1580_x3.sh
+  scripts/run_fast_livo2_methods_1580_x15.sh
+  scripts/run_r3live_official_once.sh
+  scripts/prepare_r3live_method_positions.sh
+  scripts/prepare_r3live_lio_sam_proxy_graph.sh
+  scripts/run_r3live_methods_1580_x3.sh
+  scripts/run_r3live_methods_1580_x15.sh
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -5,16 +5,13 @@ evaluate_attack.py
 Industry-standard SLAM attack evaluation using evo + Umeyama alignment.
 
 Key design decisions:
-  1. Raw error (no alignment): measures total deviation = SLAM drift + attack effect
-     - Original and attack trajectories share the same coordinate frame
-     - Both start at (0,0,0) at the same timestamp
-     - Any global offset is SLAM drift, not attack
+  1. evo APE/RPE are the headline table metrics.
+     - APE is computed with evo_ape and trajectory alignment.
+     - RPE is computed with evo_rpe at fixed spatial deltas.
 
-  2. evo ATE (Umeyama aligned): measures attack effect only
-     - Aligns attack traj to original via SE(3)
-     - Subtracts global drift, leaving only attack-induced error
-
-  3. evo RPE (1m/10m): measures local drift characteristics
+  2. Raw error (no alignment) is retained as a diagnostic view.
+     - It helps inspect shared-frame trajectory divergence and attack timing.
+     - It is not the value reported in the paper tables unless explicitly stated.
      - 1m: fine-grained local drift
      - 10m: longer-range drift patterns
 
@@ -41,6 +38,26 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+
+def prepare_trajectory_df(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    """Return finite, time-sorted trajectory rows with unique timestamps."""
+    required = ["time", "x", "y", "z", "qx", "qy", "qz", "qw"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{name} trajectory missing columns: {missing}")
+    out = df.copy()
+    for col in required:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    before = len(out)
+    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=required)
+    out = out.sort_values("time").drop_duplicates("time", keep="first").reset_index(drop=True)
+    dropped = before - len(out)
+    if dropped:
+        print(f"[WARN] Dropped {dropped} invalid/duplicate {name} trajectory rows", flush=True)
+    if len(out) < 2:
+        raise ValueError(f"{name} trajectory has too few valid rows after cleanup")
+    return out
 
 
 # ============================================================================
@@ -85,7 +102,8 @@ def umeyama_alignment(src: np.ndarray, dst: np.ndarray):
     if np.linalg.det(R) < 0:
         Vt[-1, :] *= -1
         R = Vt.T @ U.T
-    scale = np.trace(np.diag(S) @ np.diag([1, 1, np.linalg.det(R)])) / np.sum(src_centered ** 2)
+    var_src = np.sum(src_centered ** 2) / n
+    scale = np.trace(np.diag(S) @ np.diag([1, 1, np.linalg.det(R)])) / max(var_src, 1e-12)
     t = dst_mean - scale * (R @ src_mean)
     return float(scale), R, t
 
@@ -285,7 +303,7 @@ def compute_attack_metrics(orig_df: pd.DataFrame, att_df: pd.DataFrame,
     t_grid = t_orig - t_orig[0]  # relative time
     t_end = float(t_grid[-1])
 
-    # --- Raw error (primary metric for attack evaluation) ---
+    # --- Raw error (diagnostic; headline table metrics come from evo) ---
     raw_err_3d = np.linalg.norm(att_pts - orig_pts, axis=1)
     raw_err_2d = np.linalg.norm((att_pts - orig_pts)[:, :2], axis=1)
 
@@ -335,7 +353,7 @@ def compute_attack_metrics(orig_df: pd.DataFrame, att_df: pd.DataFrame,
         "mean_2d_m": float(aligned_err_2d.mean()),
         "max_2d_m": float(aligned_err_2d.max()),
         "alignment_scale": scale,
-        "note": "Aligned for reference; raw error is the primary attack metric",
+        "note": "Aligned reference metric; headline table metrics are loaded from evo.",
     }
 
     # --- Attack-specific metrics ---
@@ -401,8 +419,9 @@ def compute_attack_metrics(orig_df: pd.DataFrame, att_df: pd.DataFrame,
 def _umeyama_alignment(src, dst):
     """Umeyama (1991) similarity alignment: dst ~ s * R @ src + t.
 
-    Same formulation evo uses internally for APE / trajectory alignment
-    (with_scale=True). Returns:
+    Used only for reference visualisation. The headline evo metrics use
+    evo_ape/evo_rpe directly with the command-line alignment options below.
+    Returns:
         aligned_src: (N, 3) - transformed source points
         R: (3, 3) rotation
         t: (3,) translation
@@ -419,7 +438,7 @@ def _umeyama_alignment(src, dst):
     S = np.eye(3)
     if np.linalg.det(U) * np.linalg.det(Vt) < 0:
         S[2, 2] = -1
-    R = (Vt.T @ S @ U.T).T
+    R = Vt.T @ S @ U.T
     s = (D * np.diag(S)).sum() / var_src if var_src > 0 else 1.0
     t = mu_dst - s * R @ mu_src
     aligned = (s * (R @ src.T)).T + t
@@ -435,12 +454,25 @@ def plot_results(orig_df, att_df, metrics, out_dir, title,
     t_orig = orig_df["time"].values
     t_att = att_df["time"].values
     from scipy.interpolate import interp1d
-    interp_x = interp1d(t_att, att_df["x"].values, kind="linear", fill_value="extrapolate")
-    interp_y = interp1d(t_att, att_df["y"].values, kind="linear", fill_value="extrapolate")
-    interp_z = interp1d(t_att, att_df["z"].values, kind="linear", fill_value="extrapolate")
+    interp_x = interp1d(t_att, att_df["x"].values, kind="linear", bounds_error=False, fill_value=np.nan)
+    interp_y = interp1d(t_att, att_df["y"].values, kind="linear", bounds_error=False, fill_value=np.nan)
+    interp_z = interp1d(t_att, att_df["z"].values, kind="linear", bounds_error=False, fill_value=np.nan)
     xa = interp_x(t_orig)
     ya = interp_y(t_orig)
     za = interp_z(t_orig)
+
+    valid_mask = np.isfinite(xa) & np.isfinite(ya) & np.isfinite(za)
+    if not valid_mask.all():
+        n_removed = int((~valid_mask).sum())
+        print(f"[WARN] Plotting skipped {n_removed} frames with no attack data", flush=True)
+        t_orig = t_orig[valid_mask]
+        xa = xa[valid_mask]
+        ya = ya[valid_mask]
+        za = za[valid_mask]
+        orig_df = orig_df.iloc[np.where(valid_mask)[0]].reset_index(drop=True)
+    if len(t_orig) < 3:
+        print("[WARN] Too few overlapping frames for plots; skipping plot generation", flush=True)
+        return
 
     orig_pts = orig_df[["x", "y", "z"]].values
     att_pts = np.stack([xa, ya, za], axis=1)
@@ -494,10 +526,9 @@ def plot_results(orig_df, att_df, metrics, out_dir, title,
     plt.close(fig)
 
     # ---- 1b) Umeyama (SE(3) with scale) alignment, then XY compare ----
-    # This is the alignment evo uses internally; applying it here lets us
-    # visualise the "local" attack-induced deviation (after removing the
-    # global rotation/translation/scale between the two trajectories).
-    att_aligned, R_uma, t_uma, s_uma = _umeyama_alignment(orig_pts, att_pts)
+    # Reference visualisation after removing a global similarity transform
+    # between the two trajectories. Headline metrics are loaded from evo.
+    att_aligned, R_uma, t_uma, s_uma = _umeyama_alignment(att_pts, orig_pts)
     err2d_a = np.linalg.norm((att_aligned - orig_pts)[:, :2], axis=1)
     err3d_a = np.linalg.norm(att_aligned - orig_pts, axis=1)
     idx_a = int(np.argmax(err2d_a))
@@ -658,8 +689,8 @@ def main():
 
     # Load CSVs
     print("[INFO] Loading CSVs...", flush=True)
-    orig_df = pd.read_csv(args.orig)
-    att_df = pd.read_csv(args.att)
+    orig_df = prepare_trajectory_df(pd.read_csv(args.orig), "original")
+    att_df = prepare_trajectory_df(pd.read_csv(args.att), "attack")
     print(f"[OK] Loaded {len(orig_df)} original poses, {len(att_df)} attack poses", flush=True)
 
     # Create TUM files (matched timestamps) for evo
@@ -833,7 +864,7 @@ def main():
     else:
         print("  (not available)")
 
-    print("\n-- Raw Error (primary attack metric, no alignment) --")
+    print("\n-- Raw Error (diagnostic, no alignment) --")
     raw = metrics["raw"]
     print(f"  Duration:          {metrics['duration_s']:.1f} s  ({metrics['n_samples']} samples)")
     print(f"  3D RMSE:           {raw['rmse_3d_m']:.4f} m  |  mean: {raw['mean_3d_m']:.4f} m  |  max: {raw['max_3d_m']:.4f} m")

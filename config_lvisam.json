@@ -1,12 +1,12 @@
 {
   "main": {
     "input_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/handheld.bag",
-    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_static/smvs_3080/handheld_attack_static.bag",
+    "output_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/attack_removal/smvs_1580/handheld_attack_removal.bag",
     "reference_file": "/home/qu_menghao/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/original/handheld_original_traj.csv",
-    "spoofing_mode": "static",
-    "spoofer_x": 193.907815,
-    "spoofer_y": -12.706408,
-    "distance_threshold":30.0,
+    "spoofing_mode": "removal",
+    "spoofer_x": -18.50,
+    "spoofer_y": 70.38,
+    "distance_threshold":15.0,
     "lidar_topic": "/points_raw",
     "lidar_topic_length": 22,
     "imu_topic": "/imu_correct",
@@ -29,7 +29,7 @@
   "simulator": {
     "horizontal_resolution": 0.1,
     "vertical_lines": 16.0,
-    "spoofing_rate": 0.8,
+    "spoofing_rate": 0.3,
     "minimum_distance": 0.0,
     "maximum_distance": 30.0
   },

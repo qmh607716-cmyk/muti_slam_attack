@@ -1,0 +1,49 @@
+\begin{table*}[t]
+\centering
+\caption{Attack exposure statistics measured during attacked-bag generation.}
+\label{tab:attack_exposure_stats}
+\begin{tabular}{lllccccc}
+\hline
+Experiment & System & Condition & Mode & D/R & Triggered (\%) & Removed pts/frame & Injected pts/frame \\
+\hline
+main\_repeat & LVI-SAM & SMVS & Static & 15/80 & 1.26 $\pm$ 0.00 & 1823.0 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+main\_repeat & LVI-SAM & SMVS & Removal & 15/80 & 1.26 $\pm$ 0.00 & 1823.0 $\pm$ 0.0 & 3840.0 $\pm$ 0.0 \\
+main\_repeat & LVI-SAM & Bi-SMVS & Static & 15/80 & 1.23 $\pm$ 0.00 & 5910.0 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+main\_repeat & LVI-SAM & Bi-SMVS & Removal & 15/80 & 1.23 $\pm$ 0.00 & 5910.0 $\pm$ 0.0 & 3840.0 $\pm$ 0.0 \\
+main\_repeat & LVI-SAM & Random & Static & 15/80 & 0.89 $\pm$ 0.28 & 3960.0 $\pm$ 1663.4 & 12800.0 $\pm$ 0.0 \\
+main\_repeat & LVI-SAM & Random & Removal & 15/80 & 0.89 $\pm$ 0.28 & 3960.0 $\pm$ 1663.4 & 3840.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & SMVS & Static & 15/40 & 1.26 $\pm$ 0.00 & 889.4 $\pm$ 0.0 & 6400.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & SMVS & Static & 15/60 & 1.26 $\pm$ 0.00 & 1340.0 $\pm$ 0.0 & 9600.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & SMVS & Static & 15/80 & 1.26 $\pm$ 0.00 & 1823.0 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Static & 10/60 & 0.74 $\pm$ 0.00 & 4726.9 $\pm$ 0.0 & 9600.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Static & 15/40 & 1.23 $\pm$ 0.00 & 3071.6 $\pm$ 0.0 & 6400.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Static & 15/60 & 1.23 $\pm$ 0.00 & 4528.9 $\pm$ 0.0 & 9600.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Static & 15/80 & 1.23 $\pm$ 0.00 & 5910.0 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Static & 20/60 & 1.69 $\pm$ 0.00 & 4324.6 $\pm$ 0.0 & 9600.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Removal & 15/40 & 1.23 $\pm$ 0.00 & 3071.6 $\pm$ 0.0 & 1920.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Removal & 15/60 & 1.23 $\pm$ 0.00 & 4528.9 $\pm$ 0.0 & 2880.0 $\pm$ 0.0 \\
+param\_sweep & LVI-SAM & Bi-SMVS & Removal & 15/80 & 1.23 $\pm$ 0.00 & 5910.0 $\pm$ 0.0 & 3840.0 $\pm$ 0.0 \\
+ablation & LVI-SAM & SMVS+paper & Static & 15/80 & 0.00 $\pm$ 0.00 & -- & -- \\
+ablation & LVI-SAM & Bi-SMVS+paper & Static & 15/80 & 1.02 $\pm$ 0.00 & 6204.3 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+ablation & LVI-SAM & Bi-SMVS+CMA & Static & 15/80 & 1.47 $\pm$ 0.00 & 2628.4 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+ablation & LVI-SAM & Bi-SMVS+graph+CMA & Static & 15/80 & 1.23 $\pm$ 0.00 & 5910.0 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+ablation & LVI-SAM & smvs_geometric & Static & 15/80 & 1.39 $\pm$ 0.00 & 2910.1 $\pm$ 0.0 & 12800.0 $\pm$ 0.0 \\
+transfer & FAST-LIVO2 & SMVS & Static & 15/40 & 0.00 $\pm$ 0.00 & -- & -- \\
+transfer & FAST-LIVO2 & SMVS & Static & 15/80 & 0.00 $\pm$ 0.00 & -- & -- \\
+transfer & FAST-LIVO2 & SMVS & Removal & 15/40 & 0.00 $\pm$ 0.00 & -- & -- \\
+transfer & FAST-LIVO2 & SMVS & Removal & 15/80 & 0.00 $\pm$ 0.00 & -- & -- \\
+transfer & FAST-LIVO2 & Bi-SMVS & Static & 15/40 & 49.71 $\pm$ 0.00 & 4803.7 $\pm$ 0.0 & 2400.0 $\pm$ 0.0 \\
+transfer & FAST-LIVO2 & Bi-SMVS & Static & 15/80 & 63.02 $\pm$ 0.00 & 20949.3 $\pm$ 0.0 & 4800.0 $\pm$ 0.0 \\
+transfer & FAST-LIVO2 & Bi-SMVS & Removal & 15/40 & 49.71 $\pm$ 0.00 & 4803.7 $\pm$ 0.0 & 720.0 $\pm$ 0.0 \\
+transfer & FAST-LIVO2 & Bi-SMVS & Removal & 15/80 & 63.02 $\pm$ 0.00 & 20949.3 $\pm$ 0.0 & 1440.0 $\pm$ 0.0 \\
+transfer & R3LIVE & SMVS & Static & 15/40 & 27.20 $\pm$ 0.00 & 9645.4 $\pm$ 0.0 & 2400.0 $\pm$ 0.0 \\
+transfer & R3LIVE & SMVS & Static & 15/80 & 27.20 $\pm$ 0.00 & 16805.0 $\pm$ 0.0 & 4800.0 $\pm$ 0.0 \\
+transfer & R3LIVE & SMVS & Removal & 15/40 & 27.20 $\pm$ 0.00 & 9645.4 $\pm$ 0.0 & 720.0 $\pm$ 0.0 \\
+transfer & R3LIVE & SMVS & Removal & 15/80 & 27.20 $\pm$ 0.00 & 16805.0 $\pm$ 0.0 & 1440.0 $\pm$ 0.0 \\
+transfer & R3LIVE & Bi-SMVS & Static & 15/40 & 40.31 $\pm$ 0.00 & 9534.2 $\pm$ 0.0 & 2400.0 $\pm$ 0.0 \\
+transfer & R3LIVE & Bi-SMVS & Static & 15/80 & 40.31 $\pm$ 0.00 & 14921.1 $\pm$ 0.0 & 4800.0 $\pm$ 0.0 \\
+transfer & R3LIVE & Bi-SMVS & Removal & 15/40 & 40.31 $\pm$ 0.00 & 9534.2 $\pm$ 0.0 & 720.0 $\pm$ 0.0 \\
+transfer & R3LIVE & Bi-SMVS & Removal & 15/80 & 40.31 $\pm$ 0.00 & 14921.1 $\pm$ 0.0 & 1440.0 $\pm$ 0.0 \\
+\hline
+\end{tabular}
+\end{table*}

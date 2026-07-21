@@ -53,7 +53,8 @@ def _compute_depth_ratio_from_points(xyz: np.ndarray, robot_yaw: float) -> float
 
     Args:
         xyz:         shape (N, 3), LiDAR 点（机器人坐标系）
-        robot_yaw:   机器人偏航角（弧度）
+        robot_yaw:   retained for API compatibility. The point cloud is already
+                     in the LiDAR local frame, so yaw must not rotate the FOV.
 
     Returns:
         float: depth_ratio ∈ [0, 1]
@@ -79,12 +80,13 @@ def _compute_depth_ratio_from_points(xyz: np.ndarray, robot_yaw: float) -> float
     # LiDAR 局部角（度数 → 弧度）
     theta = np.arctan2(pts[:, 1], pts[:, 0])  # shape (N,)
 
-    # 相机世界朝向 = robot_yaw + lidar_to_cam_yaw
+    # 点云已经在 LiDAR 局部坐标系内；相机 FOV 也必须在同一局部坐标系
+    # 中判断。这里不能加 robot_yaw，否则会把局部点云按世界航向误旋转。
     lidar_to_cam_yaw = -0.04  # rad
-    cam_world = robot_yaw + lidar_to_cam_yaw
+    cam_lidar = lidar_to_cam_yaw
 
     # 相机系角（以光轴为中心）
-    theta_cam = theta - cam_world
+    theta_cam = theta - cam_lidar
     theta_cam = np.arctan2(np.sin(theta_cam), np.cos(theta_cam))
 
     # 在 FOV 内（±FOV/2）
@@ -409,7 +411,7 @@ class BimodalNode:
         l_vul_max = float(l_vul.max()) if len(l_vul) > 0 else 1.0
 
         # ---- 视觉补偿能力 V-Vul（分桶 Q + 光流一致性 + 时序 EMA）----
-        lidar_in_fov_count = int(depth_ratio * 10000)
+        lidar_in_fov_count = int(depth_ratio_vul * 10000)
         v_vul, v_info = cb.compute_visual_vul(
             robot_yaw=self.yaw,
             kp_list=kp_list,

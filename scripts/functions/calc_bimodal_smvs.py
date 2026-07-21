@@ -107,6 +107,21 @@ def bucket_score(theta_deg, value, step_deg=5.0):
     return scores, centers
 
 
+def _wrap_pi(angle_rad):
+    """Wrap radians to [-pi, pi]."""
+    return np.arctan2(np.sin(angle_rad), np.cos(angle_rad))
+
+
+def _bucket_center_to_lidar_rad(bucket_center_deg: float) -> float:
+    """
+    Convert our polar bucket convention back to LiDAR-local atan2 radians.
+
+    cartesian2polar() stores theta as atan2(y, x) + 180 deg, so LiDAR +X
+    is bucket angle 180 deg, not 0 deg.
+    """
+    return np.radians(bucket_center_deg - 180.0)
+
+
 # ---------------------------------------------------------------------------
 # V-Vul core
 # ---------------------------------------------------------------------------
@@ -140,10 +155,10 @@ def _project_kp_to_lidar_bucket(
     returning per-bucket feature count.
 
     Approximate: feature at 5m depth (real depth can be obtained from LiDAR projection).
-    The 72 buckets span the 360° azimuth around the robot, indexed in the world
-    frame. Each keypoint's azimuth is determined solely by its horizontal pixel
-    coordinate `u`; the vertical pixel `v` is used only to filter keypoints that
-    fall inside the camera's vertical FOV, never to influence the azimuth bucket.
+    The 72 buckets are in the same LiDAR-local convention as L-Vul:
+    cartesian2polar() maps LiDAR +X to 180 deg. Each keypoint's azimuth is
+    determined by its horizontal pixel coordinate `u`; the vertical pixel `v`
+    is used only to filter keypoints that fall inside the camera's vertical FOV.
     """
     n_buckets = int(360.0 / step_deg)
     counts = np.zeros(n_buckets, dtype=np.float64)
@@ -152,7 +167,11 @@ def _project_kp_to_lidar_bucket(
         return counts
 
     fx, u0 = _CAM_FX, _CAM_U0
-    cam_world = robot_yaw + lidar_to_cam_yaw
+    # L-Vul is computed from the raw LiDAR scan in the LiDAR local frame.
+    # Therefore V-Vul must also be bucketed in the LiDAR local frame. Robot yaw
+    # must not rotate the visual buckets, otherwise temporal smoothing smears
+    # camera coverage over all 360 degrees.
+    cam_lidar = lidar_to_cam_yaw
 
     half_v_tan = np.tan(_FOV_V * 0.5)
     for kp in kp_list:
@@ -160,10 +179,10 @@ def _project_kp_to_lidar_bucket(
         # Vertical FOV gate: drop keypoints outside the camera's pitch range
         if abs(v - _CAM_V0) / _CAM_FY > half_v_tan:
             continue
-        # Azimuth comes from the horizontal pixel only
+        # Azimuth comes from the horizontal pixel only.
         x_c = (u - u0) / fx
-        theta_lidar = np.arctan2(0.0, x_c) + cam_world
-        theta_lidar_deg = np.degrees(theta_lidar) + 180.0
+        theta_lidar = np.arctan(x_c) + cam_lidar
+        theta_lidar_deg = (np.degrees(theta_lidar) + 180.0) % 360.0
         idx = int(theta_lidar_deg / step_deg) % n_buckets
         counts[idx] += 1.0
 
@@ -196,7 +215,8 @@ def _optical_flow_per_bucket(
         return scores
 
     h, w = curr_gray.shape[:2]
-    cam_world = robot_yaw + lidar_to_cam_yaw
+    # Keep optical-flow buckets in LiDAR local coordinates, matching L-Vul.
+    cam_lidar = lidar_to_cam_yaw
 
     flow = cv2.calcOpticalFlowFarneback(
         prev_gray, curr_gray, None,
@@ -207,9 +227,9 @@ def _optical_flow_per_bucket(
     mag = np.sqrt(fx_flow**2 + fy_flow**2)
 
     u_coords, v_coords = np.meshgrid(np.arange(w), np.arange(h))
-    theta_cam_h = (u_coords - _CAM_U0) / _CAM_FX
+    theta_cam_h = np.arctan((u_coords - _CAM_U0) / _CAM_FX)
     phi_cam_v   = (v_coords - _CAM_V0) / _CAM_FY
-    theta_lidar = theta_cam_h + cam_world
+    theta_lidar = theta_cam_h + cam_lidar
     idx_map = ((np.degrees(theta_lidar) + 180.0) / step_deg).astype(np.int32) % n_buckets
 
     valid_v = np.abs(phi_cam_v) <= (_FOV_V / 2.0)
@@ -318,7 +338,9 @@ def compute_visual_vul(
     n_buckets = int(360.0 / step_deg)
 
     lidar_to_cam_yaw = -0.04
-    cam_world = robot_yaw + lidar_to_cam_yaw
+    # Visual and LiDAR vulnerability vectors are both expressed in the LiDAR
+    # local bucket frame. Do not include robot_yaw here.
+    cam_lidar = lidar_to_cam_yaw
 
     # Global quantities (not per-bucket)
     depth_quality = 0.0
@@ -342,9 +364,8 @@ def compute_visual_vul(
     v_vul = np.zeros(n_buckets, dtype=np.float64)
     for k in range(n_buckets):
         theta_lidar_deg = (k + 0.5) * step_deg
-        theta_lidar_rad = np.radians(theta_lidar_deg)
-        theta_cam = theta_lidar_rad - cam_world
-        theta_cam = np.arctan2(np.sin(theta_cam), np.cos(theta_cam))
+        theta_lidar_rad = _bucket_center_to_lidar_rad(theta_lidar_deg)
+        theta_cam = _wrap_pi(theta_lidar_rad - cam_lidar)
 
         coverage = _hierarchical_coverage(theta_cam)
         if coverage <= 0:

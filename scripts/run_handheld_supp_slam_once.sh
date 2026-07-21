@@ -22,7 +22,6 @@ OUT_ROOT="${OUT_ROOT:-$HOME/catkin_ws/src/LVI-SAM/datasets/slamspoof_handheld/su
 
 ROS_SETUP="/opt/ros/noetic/setup.bash"
 MAIN_WS_SETUP="$HOME/catkin_ws/devel_catkin_tools/setup.bash"
-SUPP_WS_SETUP="$HOME/catkin_ws/supp_ws/devel/setup.bash"
 SLAMSPOOF_DIR="$HOME/catkin_ws/src/slamspoof"
 
 ODOM_TOPIC="/aft_mapped_to_init"
@@ -46,9 +45,6 @@ mkdir -p "$ROS_HOME"
 
 source "$ROS_SETUP"
 source "$MAIN_WS_SETUP"
-if [[ -f "$SUPP_WS_SETUP" ]]; then
-    source "$SUPP_WS_SETUP"
-fi
 
 case "$TARGET" in
     fast_livo2)
